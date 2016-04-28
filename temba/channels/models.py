@@ -41,6 +41,7 @@ from temba.utils.gsm7 import is_gsm7, replace_non_gsm7_accents
 from temba.utils.models import TembaModel, generate_uuid
 from urllib import quote_plus
 from xml.sax.saxutils import quoteattr, escape
+from temba import settings
 
 AFRICAS_TALKING = 'AT'
 ANDROID = 'A'
@@ -551,7 +552,6 @@ class Channel(TembaModel):
 
     @classmethod
     def add_whatsapp_channel(cls, org, user, cc, phone, password):
-        print(password)
         config = dict(password=password,
                       phone=phone,
                       cc=cc)
@@ -2174,17 +2174,17 @@ class Channel(TembaModel):
     @classmethod
     def send_whatsapp_message(cls, channel, msg, text):
         from temba.msgs.models import Msg, WIRED
-        from temba.utils.yowsup_layer import YowsupSendStack
+        from firebase.firebase import *
+        firebase = FirebaseApplication(settings.URLFIREBASE, None)
         start = time.time()
         try:
             credentials = (channel.config['phone'], channel.config['password'])
-            print(credentials)
             text = ("{0}".format(text)).encode('utf-8', 'ignore')
-            result = YowsupSendStack(credentials, [(msg.urn_path, text)])
-            try:
-                result.start()
-            except KeyboardInterrupt:
-                pass
+            contact = msg.urn_path.replace('+', '')
+            firebase.put('{0}/messages/outgoing'.format(channel.uuid), name=msg.id, data={
+                'message': text,
+                'to': contact
+            })
             ChannelLog.log_success(msg, "Successfully delivered message")
             Msg.mark_sent(channel.config['r'], channel, msg, WIRED, time.time() - start)
         except Exception as e:
