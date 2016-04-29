@@ -1476,7 +1476,7 @@ class ContactURN(models.Model):
         norm_scheme = unicode(scheme).strip().lower()
         norm_path = unicode(path).strip()
 
-        if norm_scheme == TEL_SCHEME:
+        if norm_scheme == TEL_SCHEME or norm_scheme == WHATSAPP_SCHEME:
             norm_path, valid = cls.normalize_number(norm_path, country_code)
         elif norm_scheme == TWITTER_SCHEME:
             norm_path = norm_path.lower()

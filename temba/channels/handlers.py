@@ -1787,7 +1787,9 @@ class WhatsappHandler(View):
             date = request.REQUEST.get('date', request.REQUEST.get('time', None))
             if date:
                 date = json_date_to_datetime(date)
-            sms = Msg.create_incoming(channel, (WHATSAPP_SCHEME, request.REQUEST['from']), request.REQUEST['msg'], date=date)
+
+            norm_scheme, norm_path = ContactURN.normalize_urn(WHATSAPP_SCHEME, request.REQUEST['from'])
+            sms = Msg.create_incoming(channel, (WHATSAPP_SCHEME, norm_path), request.REQUEST['msg'], date=date)
             return HttpResponse("Message accepted: %d" % sms.id)
         except:
             return HttpResponse("Not handled", status=400)
