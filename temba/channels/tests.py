@@ -1305,6 +1305,31 @@ class ChannelTest(TembaTest):
         self.assertEqual(channel.channel_type, "TMS")
         self.assertEqual(channel.config_json(), dict(messaging_service_sid="MSG-SERVICE-SID"))
 
+    @patch('temba.orgs.models.TwilioRestClient', MockTwilioClient)
+    @patch('temba.ivr.clients.TwilioClient', MockTwilioClient)
+    @patch('twilio.util.RequestValidator', MockRequestValidator)
+    def test_claim_twiml_api(self):
+        self.login(self.admin)
+
+        # remove any existing channels
+        self.org.channels.update(is_active=False, org=None)
+
+        claim_url = reverse('channels.channel_claim_twiml_api')
+
+        # can fetch the claim page
+        response = self.client.get(claim_url)
+        self.assertEqual(200, response.status_code)
+        self.assertContains(response, 'TwiML')
+
+        response = self.client.post(claim_url, dict(number='5512345678', country='AA'))
+        self.assertTrue(response.context['form'].errors)
+
+        response = self.client.post(claim_url, dict(country='US', number='5512345678', url='https://twilio.com', role='SR', account_sid='abcd1234', account_token='abcd1234'))
+        channel = self.org.channels.all().first()
+        self.assertRedirects(response, reverse('channels.channel_configuration', args=[channel.pk]))
+        self.assertEqual(channel.channel_type, "TW")
+        self.assertEqual(channel.config_json(), dict(ACCOUNT_TOKEN='abcd1234', send_url='https://twilio.com', ACCOUNT_SID='abcd1234'))
+
     def test_claim_facebook(self):
         self.login(self.admin)
 
@@ -5092,76 +5117,6 @@ class TwimlAPITest(TembaTest):
         self.assertEquals(200, response.status_code)
         sms = Msg.all_messages.get()
         self.assertEquals(FAILED, sms.status)
-
-    def test_send(self):
-
-        joe = self.create_contact("Joe", "+250788383383")
-        bcast = joe.send("Test message", self.admin, trigger_send=False)
-
-        # our outgoing sms
-        sms = bcast.get_messages()[0]
-
-        try:
-            settings.SEND_MESSAGES = True
-
-            with patch('twilio.rest.resources.Messages.create') as mock:
-                mock.return_value = "Sent"
-
-                # manually send it off
-                Channel.send_message(dict_to_struct('MsgStruct', sms.as_task_json()))
-
-                # check the status of the message is now sent
-                msg = bcast.get_messages()[0]
-                self.assertEquals(WIRED, msg.status)
-                self.assertTrue(msg.sent_on)
-
-                self.clear_cache()
-
-            with patch('twilio.rest.resources.Messages.create') as mock:
-                mock.side_effect = Exception("Failed to send message")
-
-                # manually send it off
-                Channel.send_message(dict_to_struct('MsgStruct', sms.as_task_json()))
-
-                # message should be marked as an error
-                msg = bcast.get_messages()[0]
-                self.assertEquals(ERRORED, msg.status)
-                self.assertEquals(1, msg.error_count)
-                self.assertTrue(msg.next_attempt)
-
-            # check that our channel log works as well
-            self.login(self.admin)
-
-            response = self.client.get(reverse('channels.channellog_list') + "?channel=%d" % (self.channel.pk))
-
-            # there should be two log items for the two times we sent
-            self.assertEquals(2, len(response.context['channellog_list']))
-
-            # of items on this page should be right as well
-            self.assertEquals(2, response.context['paginator'].count)
-
-            # the counts on our relayer should be correct as well
-            self.channel = Channel.objects.get(id=self.channel.pk)
-            self.assertEquals(1, self.channel.get_error_log_count())
-            self.assertEquals(1, self.channel.get_success_log_count())
-
-            # view the detailed information for one of them
-            response = self.client.get(reverse('channels.channellog_read', args=[ChannelLog.objects.all()[1].pk]))
-
-            # check that it contains the log of our exception
-            self.assertContains(response, "Failed to send message")
-
-            # delete our error entry
-            ChannelLog.objects.filter(is_error=True).delete()
-
-            # our counts should be right
-            # the counts on our relayer should be correct as well
-            self.channel = Channel.objects.get(id=self.channel.pk)
-            self.assertEquals(0, self.channel.get_error_log_count())
-            self.assertEquals(1, self.channel.get_success_log_count())
-
-        finally:
-            settings.SEND_MESSAGES = False
 
 
 class ClickatellTest(TembaTest):
