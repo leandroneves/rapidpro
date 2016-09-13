@@ -145,7 +145,7 @@ class Channel(TembaModel):
         TYPE_CHIKKA: dict(scheme='tel', max_length=160),
         TYPE_CLICKATELL: dict(scheme='tel', max_length=420),
         TYPE_EXTERNAL: dict(max_length=160),
-        TYPE_FACEBOOK: dict(scheme='facebook', max_length=320),
+        TYPE_FACEBOOK: dict(scheme='facebook', max_length=10000),
         TYPE_GLOBE: dict(scheme='tel', max_length=160),
         TYPE_HIGH_CONNECTION: dict(scheme='tel', max_length=320),
         TYPE_HUB9: dict(scheme='tel', max_length=1600),
@@ -1159,12 +1159,18 @@ class Channel(TembaModel):
     @classmethod
     def send_facebook_message(cls, channel, msg, text):
         from temba.msgs.models import Msg, WIRED
-        from temba.utils.fb_payload import get_fb_payload
 
         # build our payload
         payload = dict()
         payload['recipient'] = dict(id=msg.urn_path)
-        payload['message'] = get_fb_payload(msg, text)
+
+        try:
+            text = text.replace("\n\t", "").replace("\n", "").replace("\t", "")
+            message = json.loads(text)
+            payload['message'] = message
+        except:
+            payload['message'] = dict(text=text)
+
         payload = json.dumps(payload)
 
         url = "https://graph.facebook.com/v2.5/me/messages"
