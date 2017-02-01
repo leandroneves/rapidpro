@@ -1,20 +1,20 @@
-from __future__ import unicode_literals
+from __future__ import print_function, unicode_literals
 
 import requests
 import logging
 import time
 
+from celery.task import task
 from datetime import timedelta
 from django.conf import settings
 from django.utils import timezone
-from djcelery_transactions import task
+from django_redis import get_redis_connection
 from enum import Enum
-from redis_cache import get_redis_connection
 from temba.msgs.models import SEND_MSG_TASK, MSG_QUEUE
 from temba.utils import dict_to_struct
-from temba.utils.queues import pop_task, push_task
+from temba.utils.queues import start_task, push_task, nonoverlapping_task, complete_task
 from temba.utils.mage import MageClient
-from .models import Channel, Alert, ChannelLog, ChannelCount, AUTH_TOKEN
+from .models import Channel, Alert, ChannelLog, ChannelCount
 
 
 logger = logging.getLogger(__name__)
@@ -38,13 +38,13 @@ def send_msg_task():
     Pops the next message off of our msg queue to send.
     """
     # pop off the next task
-    msg_tasks = pop_task(SEND_MSG_TASK)
+    org_id, msg_tasks = start_task(SEND_MSG_TASK)
 
     # it is possible we have no message to send, if so, just return
-    if not msg_tasks:
+    if not msg_tasks:  # pragma: needs cover
         return
 
-    if not isinstance(msg_tasks, list):
+    if not isinstance(msg_tasks, list):  # pragma: needs cover
         msg_tasks = [msg_tasks]
 
     r = get_redis_connection()
@@ -64,25 +64,22 @@ def send_msg_task():
                     time.sleep(1)
 
     finally:  # pragma: no cover
+        # mark this worker as done
+        complete_task(SEND_MSG_TASK, org_id)
+
         # if some msgs weren't sent for some reason, then requeue them for later sending
         if msg_tasks:
             # requeue any unsent msgs
-            push_task(msg_tasks[0]['org'], MSG_QUEUE, SEND_MSG_TASK, msg_tasks)
+            push_task(org_id, MSG_QUEUE, SEND_MSG_TASK, msg_tasks)
 
 
-@task(track_started=True, name='check_channels_task')
+@nonoverlapping_task(track_started=True, name='check_channels_task', lock_key='check_channels')
 def check_channels_task():
     """
     Run every 30 minutes.  Checks if any channels who are active have not been seen in that
     time.  Triggers alert in that case
     """
-    r = get_redis_connection()
-
-    # only do this if we aren't already checking campaigns
-    key = 'check_channels'
-    if not r.get(key):
-        with r.lock(key, timeout=300):
-            Alert.check_alerts()
+    Alert.check_alerts()
 
 
 @task(track_started=True, name='send_alert_task')
@@ -91,21 +88,27 @@ def send_alert_task(alert_id, resolved):
     alert.send_email(resolved)
 
 
-@task(track_started=True, name='trim_channel_log_task')
-def trim_channel_log_task():
+@nonoverlapping_task(track_started=True, name='trim_channel_log_task')
+def trim_channel_log_task():  # pragma: needs cover
     """
     Runs daily and clears any channel log items older than 48 hours.
     """
+
+    # keep success messages for only two days
     two_days_ago = timezone.now() - timedelta(hours=48)
-    ChannelLog.objects.filter(created_on__lte=two_days_ago).delete()
+    ChannelLog.objects.filter(created_on__lte=two_days_ago, is_error=False).delete()
+
+    # keep errors for 30 days
+    month_ago = timezone.now() - timedelta(days=30)
+    ChannelLog.objects.filter(created_on__lte=month_ago).delete()
 
 
 @task(track_started=True, name='notify_mage_task')
 def notify_mage_task(channel_uuid, action):
     """
-    Notifies Mage of a change to a Twitter channel. Having this in a djcelery_transactions task ensures that the channel
-    db object is updated before Mage tries to fetch it
+    Notifies Mage of a change to a Twitter channel
     """
+    action = MageStreamAction[action]
     mage = MageClient(settings.MAGE_API_URL, settings.MAGE_AUTH_TOKEN)
 
     if action == MageStreamAction.activate:
@@ -118,14 +121,9 @@ def notify_mage_task(channel_uuid, action):
         raise ValueError('Invalid action: %s' % action)
 
 
-@task(track_started=True, name="squash_channelcounts")
+@nonoverlapping_task(track_started=True, name="squash_channelcounts", lock_key='squash_channelcounts')
 def squash_channelcounts():
-    r = get_redis_connection()
-
-    key = 'squash_channelcounts'
-    if not r.get(key):
-        with r.lock(key, timeout=900):
-            ChannelCount.squash_counts()
+    ChannelCount.squash_counts()
 
 
 @task(track_started=True, name="fb_channel_subscribe")
@@ -133,11 +131,11 @@ def fb_channel_subscribe(channel_id):
     channel = Channel.objects.filter(id=channel_id, is_active=True).first()
 
     if channel:
-        page_access_token = channel.config_json()[AUTH_TOKEN]
+        page_access_token = channel.config_json()[Channel.CONFIG_AUTH_TOKEN]
 
         # subscribe to messaging events for this channel
         response = requests.post('https://graph.facebook.com/v2.6/me/subscribed_apps',
                                  params=dict(access_token=page_access_token))
 
         if response.status_code != 200 or not response.json()['success']:
-            print "Unable to subscribe for delivery of events: %s" % response.content
+            print("Unable to subscribe for delivery of events: %s" % response.content)

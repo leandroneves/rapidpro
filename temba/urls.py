@@ -8,6 +8,8 @@ from django.conf.urls import include, url
 from django.contrib.auth.models import User, AnonymousUser
 from django.conf import settings
 from temba.channels.views import register, sync
+from django.views.i18n import javascript_catalog
+from django.conf.urls.static import static
 
 # javascript translation packages
 js_info_dict = {
@@ -28,20 +30,20 @@ urlpatterns = [
     url(r'^', include('temba.locations.urls')),
     url(r'^', include('temba.api.urls')),
     url(r'^', include('temba.channels.urls')),
+    url(r'^', include('temba.airtime.urls')),
     url(r'^relayers/relayer/sync/(\d+)/$', sync, {}, 'sync'),
     url(r'^relayers/relayer/register/$', register, {}, 'register'),
     url(r'^users/', include('smartmin.users.urls')),
     url(r'^imports/', include('smartmin.csv_imports.urls')),
     url(r'^assets/', include('temba.assets.urls')),
-    url(r'^jsi18n/$', 'django.views.i18n.javascript_catalog', js_info_dict)
+    url(r'^jsi18n/$', javascript_catalog, js_info_dict, name='django.views.i18n.javascript_catalog'),
 ]
 
 if settings.DEBUG:
-    urlpatterns.append(url(r'^media/(?P<path>.*)$', 'django.views.static.serve', {'document_root': settings.MEDIA_ROOT, }))
-
+    urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
 
 # import any additional urls
-for app in settings.APP_URLS:
+for app in settings.APP_URLS:  # pragma: needs cover
     importlib.import_module(app)
 
 
@@ -49,13 +51,13 @@ for app in settings.APP_URLS:
 def init_analytics():
     import analytics
     analytics_key = getattr(settings, 'SEGMENT_IO_KEY', None)
-    if analytics_key:
+    if analytics_key:  # pragma: needs cover
         analytics.init(analytics_key, send=settings.IS_PROD, log=not settings.IS_PROD, log_level=logging.DEBUG)
 
     from temba.utils.analytics import init_librato
     librato_user = getattr(settings, 'LIBRATO_USER', None)
     librato_token = getattr(settings, 'LIBRATO_TOKEN', None)
-    if librato_user and librato_token:
+    if librato_user and librato_token:  # pragma: needs cover
         init_librato(librato_user, librato_token)
 
 # initialize our analytics (the signal below will initialize each worker)
@@ -64,7 +66,7 @@ init_analytics()
 
 @worker_process_init.connect
 def configure_workers(sender=None, **kwargs):
-    init_analytics()
+    init_analytics()  # pragma: needs cover
 
 
 def track_user(self):  # pragma: no cover
@@ -106,6 +108,4 @@ def handler500(request):
     from django.http import HttpResponseServerError
 
     t = loader.get_template('500.html')
-    return HttpResponseServerError(t.render(Context({
-        'request': request,
-    })))
+    return HttpResponseServerError(t.render(Context({'request': request})))  # pragma: needs cover

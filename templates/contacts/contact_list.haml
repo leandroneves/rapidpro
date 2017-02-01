@@ -34,15 +34,15 @@
                 -trans "Contacts"
               - for folder in folders
                 %li{'class':'{% if request.path == folder.url %}active{% endif %}'}
-                  %a{'href':'={folder.url}'}
-                    ={folder.label} ({{ folder.count | intcomma }})
+                  %a{'href':'{{folder.url}}'}
+                    {{folder.label}} ({{ folder.count | intcomma }})
 
               %li.nav-header
                 -trans "Groups"
               - for group in groups
                 %li{'class':'{% if current_group.id == group.pk %}active{% endif %}'}
-                  %a{'href':'{% url "contacts.contact_filter" group.pk %}'}
-                    ={group.label} ({{ group.count | intcomma }})
+                  %a{'href':'{% url "contacts.contact_filter" group.uuid %}'}
+                    {{group.label}} ({{ group.count | intcomma }})
 
           %div{style:"margin-top: 10px"}
             - if org_perms.contacts.contact_create
@@ -180,10 +180,10 @@
                       %td.hide
                         .value-labels
                           %nobr
-                            - for group in object.groups.all
+                            - for group in object.user_groups.all
                               %span.label.label-info.lbl{ data-id: '{{group.id}}'}
-                                %a{'href':'{% url "contacts.contact_filter" group.pk %}'}
-                                  ={group.name}
+                                %a{'href':'{% url "contacts.contact_filter" group.uuid %}'}
+                                  {{group.name}}
 
                   -empty
                     %tr
@@ -329,9 +329,9 @@
 
     {% if org_perms.msgs.broadcast_send %}
     $(".send-button").click(function(){
-      var contactsIds = getCheckedIds();
-      if (contactsIds.length > 0) {
-        showComposeInitialized("c=" + contactsIds);
+      var contactsUuids = getCheckedUuids();
+      if (contactsUuids.length > 0) {
+        showComposeInitialized("c=" + contactsUuids);
       } else {
         showCompose();
       }

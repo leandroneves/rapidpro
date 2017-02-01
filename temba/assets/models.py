@@ -1,6 +1,7 @@
 from __future__ import absolute_import, unicode_literals
 
 import os
+import six
 
 from django.conf import settings
 from django.core.files.storage import default_storage
@@ -54,7 +55,7 @@ class BaseAssetStore(object):
         """
         asset = self.derive_asset(pk)
 
-        if not user.has_org_perm(asset.org, self.permission):
+        if not user.has_org_perm(asset.org, self.permission):  # pragma: needs cover
             raise AssetAccessDenied()
 
         if not asset.uuid:
@@ -62,7 +63,7 @@ class BaseAssetStore(object):
 
         path = self.derive_path(asset.org, asset.uuid)
 
-        if not default_storage.exists(path):
+        if not default_storage.exists(path):  # pragma: needs cover
             raise AssetFileNotFound()
 
         # create a more friendly download filename
@@ -70,7 +71,7 @@ class BaseAssetStore(object):
         filename = '%s_%s.%s' % (self.asset_type.name, pk, extension)
 
         # if our storage backend is S3
-        if settings.DEFAULT_FILE_STORAGE == 'storages.backends.s3boto.S3BotoStorage':
+        if settings.DEFAULT_FILE_STORAGE == 'storages.backends.s3boto.S3BotoStorage':  # pragma: needs cover
             # generate our URL manually so that we can force the download name for the user
             url = default_storage.connection.generate_url(default_storage.querystring_expire,
                                                           method='GET', bucket=default_storage.bucket.name,
@@ -90,7 +91,7 @@ class BaseAssetStore(object):
         """
         Saves a file asset
         """
-        if extension not in self.extensions:
+        if extension not in self.extensions:  # pragma: needs cover
             raise ValueError("Extension %s not supported by handler" % extension)
 
         asset = self.derive_asset(pk)
@@ -114,8 +115,8 @@ class BaseAssetStore(object):
         """
         Derives the storage path of an asset, e.g. 'orgs/1/recordings/asdf-asdf-asdf-asdf-asdf-asdf.wav'
         """
-        base_name = unicode(uuid)
-        directory = os.path.join(settings.STORAGE_ROOT_DIR, unicode(org.pk), self.directory)
+        base_name = six.text_type(uuid)
+        directory = os.path.join(settings.STORAGE_ROOT_DIR, six.text_type(org.pk), self.directory)
 
         if extension:
             return '%s/%s.%s' % (directory, base_name, extension)
@@ -126,28 +127,28 @@ class BaseAssetStore(object):
             if default_storage.exists(path):
                 return path
 
-        raise AssetFileNotFound()
+        raise AssetFileNotFound()  # pragma: needs cover
 
 
 class ContactExportAssetStore(BaseAssetStore):
     model = ExportContactsTask
     directory = 'contact_exports'
     permission = 'contacts.contact_export'
-    extensions = ('xls', 'csv')
+    extensions = ('xlsx', 'csv')
 
 
 class ResultsExportAssetStore(BaseAssetStore):
     model = ExportFlowResultsTask
     directory = 'results_exports'
     permission = 'flows.flow_export_results'
-    extensions = ('xls',)
+    extensions = ('xlsx',)
 
 
 class MessageExportAssetStore(BaseAssetStore):
     model = ExportMessagesTask
     directory = 'message_exports'
     permission = 'msgs.msg_export'
-    extensions = ('xls',)
+    extensions = ('xlsx',)
 
 
 class AssetType(Enum):

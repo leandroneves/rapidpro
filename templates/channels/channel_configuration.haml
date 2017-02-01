@@ -262,6 +262,35 @@
 
     %hr
 
+  -elif object.channel_type == 'TW'
+    %h4
+      -blocktrans
+        To finish configuring your TwiML REST API channel you'll need to add the following URL in your TwiML REST API instance.
+
+    %hr
+
+    %h4
+      -trans "TwiML REST API Host"
+
+    %p
+      -blocktrans
+        The endpoint which will receive Twilio API requests for this channel
+
+    %code
+      {{ object.config_json.send_url }}
+
+    %h4
+      -trans "Request URL"
+
+    %p
+      -blocktrans
+        Incoming messages for this channel will be sent to this endpoint.
+
+    %code
+      https://{{ domain }}{% url 'handlers.twiml_api_handler' object.uuid %}
+
+    %hr
+
   -elif object.channel_type == 'SC'
     %h4
       -blocktrans
@@ -398,12 +427,78 @@
     %p
       -blocktrans
         This endpoint should be called by Hub9 when a message has been to the final recipient. (delivery reports)
-        You can set the delivery callback URL on your Infobip account by contacting your sales agent.
+        You can set the delivery callback URL on your Hub9 account by contacting your sales agent.
 
     %code
       https://{{ domain }}{% url 'handlers.hub9_handler' 'delivered' object.uuid %}
 
-  -elif object.channel_type == 'VM'
+    %hr
+
+    %h4
+      -trans "IP Addresses"
+
+    %p
+      Contact your sales agent to make sure the following IPs are whitelisted
+
+    -for ip_address in ip_addresses
+      %code= ip_address
+
+
+  -elif object.channel_type == 'DA'
+    %h4
+      -blocktrans
+        To finish configuring your Dart Media connection you'll need to provide them with the following details.
+
+    .clearfix
+      .config-value
+        .name
+          -trans "Username:"
+        .value {{ object.config_json.username }}
+      .config-value
+        .name
+          -trans "Password:"
+        .value
+          xxxxxxxx
+
+    .clearfix
+    %hr
+
+    %h4
+      -trans "Received URL"
+
+    %p
+      -blocktrans
+        This endpoint should be called by Dart Media when new messages are received to your number. You can set the receive URL on your Dart Media account by contacting your sales agent.
+
+    %code
+      https://{{ domain }}{% url 'handlers.dartmedia_handler' 'received' object.uuid %}
+
+    %hr
+
+    %h4
+      -trans "Delivered URL"
+
+    %p
+      -blocktrans
+        This endpoint should be called by Dart Media when a message has been to the final recipient. (delivery reports)
+        You can set the delivery callback URL on your Dart Media account by contacting your sales agent.
+
+    %code
+      https://{{ domain }}{% url 'handlers.dartmedia_handler' 'delivered' object.uuid %}
+
+    %hr
+
+    %h4
+      -trans "IP Addresses"
+
+    %p
+      Contact your sales agent to make sure the following IPs are whitelisted
+
+    -for ip_address in ip_addresses
+      %code= ip_address
+
+
+  -elif object.channel_type == 'VM' or object.channel_type == 'VMU'
     %h4
       -blocktrans
         To finish configuring your Vumi connection you'll need to set the following parameters on your Vumi conversation:
@@ -489,7 +584,7 @@
           keyword = default
           allowed-receiver-prefix = {{channel.address}}
           max-messages = 0
-          post-url = "https://{{domain}}{% url 'handlers.kannel_handler' 'receive' object.uuid %}/?backend=%i&sender=%p&message=%b&ts=%T&id=%I"
+          post-url = "https://{{domain}}{% url 'handlers.kannel_handler' 'receive' object.uuid %}/?backend=%i&sender=%p&message=%b&ts=%T&id=%I&to=%P"
           concatenation = true
           assume-plain-text = true
           accept-x-kannel-headers = true
@@ -547,9 +642,9 @@
   -elif object.channel_type == 'FB'
     %h4
       -blocktrans
-        To finish configuring your Facebook connection you'll need to set the following webhook URL on your application
-        page, use the verify token below when updating it. Make sure to check all boxes to subscribe to all incoming
-        Facebook events.
+        To finish configuring your Facebook connection, you'll need to enter the following webhook URL and token on your application's
+        Messenger settings page. Make sure to check all boxes within the 'Webhooks' section to subscribe to all incoming Facebook events
+        and, within the same section, select the page whose events you'd like the webhook to subscribe to. 
 
     .important
       %p
@@ -557,6 +652,11 @@
           It may take up to ten minutes for a new webhook to take effect after being set on your Facebook application. Remember,
           until your Facebook application is approved by Facebook you will only be able to send and receive messages
           with administrators of your application.
+
+      %p
+        -blocktrans
+          When submitting your application for approval, make sure to include the <code>pages_messaging</code>
+          and <code>pages_messaging_subscriptions</code> permissions so that you are able to initiate conversations with your contacts.
 
     %hr
 
@@ -571,6 +671,90 @@
 
     %code
       {{ channel.secret }}
+
+  -elif object.channel_type == 'VI'
+    %h4
+      -blocktrans
+        Your Viber channel is connected, the IP addresses, status and receive endpoints are listed below.
+
+    %hr
+
+    %h4
+      -trans "IP Addresses"
+
+    -for ip_address in ip_addresses
+      %code= ip_address
+
+    %h4
+      -trans "Status URL"
+
+    %code
+      https://{{ domain }}{% url 'handlers.viber_handler' 'status' object.uuid %}
+
+    %h4
+      -trans "Receive URL"
+
+    %code
+      https://{{ domain }}{% url 'handlers.viber_handler' 'receive' object.uuid %}
+
+  -elif object.channel_type == 'VI'
+    %h4
+      -blocktrans
+        Your Viber public channel is connected. If needed the webhook endpoints are listed below.
+
+    %hr
+
+    %h4
+      -trans "Webhook URL"
+
+    %code
+      https://{{ domain }}{% url 'handlers.viber_public_handler' object.uuid %}
+
+  -elif object.channel_type == 'LN'
+    %h4
+      -blocktrans
+        To finish the configuration of Line channel you'll need to set the following callback URL in the Line Bot settings page, following the steps below:
+
+    .info
+
+      %p
+
+        %ol.line-steps
+          %li
+            -blocktrans
+              Configure "Callback URL" in the channel page (the same page which get the information Channel Secret and Channel Access Token) by clicking on the "Edit" button, filling the field "webhook URL" and pressing on the "Save" button.
+
+          %li
+            -blocktrans
+              Fill the IP addresses in the "Server IP Whitelist" with the list of addresses displayed below.
+
+    %h4
+      -trans "Callback URL"
+
+    %code
+      https://{{ domain }}{% url 'handlers.line_handler' object.uuid %}
+
+    %hr
+
+    %h4
+      -trans "IP Addresses"
+
+    -for ip_address in ip_addresses
+      %code= ip_address
+
+  -elif object.channel_type == 'GL'
+    %h4
+      -blocktrans
+        To finish configuring your Globe Labs connection you'll need to set the following notify URI for SMS on your
+        application configuration page.
+
+    %hr
+
+    %h4
+      -trans "Notify URI"
+
+    %code
+      https://{{ domain }}{% url 'handlers.globe_handler' 'receive' object.uuid %}
 
   -elif object.channel_type == 'HX'
     %h4
@@ -780,3 +964,11 @@
       font-size:20px;
     }
 
+    ol.line-steps li {
+      margin-top: 10px;
+      list-style: decimal;
+    }
+
+    .info {
+      margin-bottom: 20px;
+    }

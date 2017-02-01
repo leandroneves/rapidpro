@@ -2,6 +2,8 @@
 
 from __future__ import unicode_literals
 
+import six
+
 # All valid GSM7 characters, table format
 VALID_GSM7 = u"@£$¥èéùìòÇ\nØø\rÅåΔ_ΦΓΛΩΠΨΣΘΞ\x1bÆæßÉ !\"#¤%&'()*+,-./0123456789:;<=>" \
              u"?¡ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÑÜ`¿abcdefghijklmnopqrstuvwxyzäöñüà" \
@@ -18,7 +20,9 @@ GSM7_REPLACEMENTS = {u'á': 'a',
                      u'â': 'a',
                      u'ç': 'c',
                      u'í': 'i',
+                     u'î': 'i',
                      u'ú': 'u',
+                     u'û': 'u',
                      u'õ': 'o',
                      u'ô': 'o',
                      u'ó': 'o',
@@ -31,11 +35,15 @@ GSM7_REPLACEMENTS = {u'á': 'a',
                      u'È': 'E',
                      u'Ê': 'E',
                      u'Í': 'I',
+                     u'Î': 'I',
+                     u'Ì': 'I',
                      u'Ó': 'O',
                      u'Ô': 'O',
+                     u'Ò': 'O',
                      u'Õ': 'O',
                      u'Ú': 'U',
                      u'Ù': 'U',
+                     u'Û': 'U',
 
                      # shit Word likes replacing automatically
                      u'’': '\'',
@@ -43,6 +51,7 @@ GSM7_REPLACEMENTS = {u'á': 'a',
                      u'“': '"',
                      u'”': '"',
                      u'–': '-',
+                     u'\xa0': ' ',
                      }
 
 
@@ -243,14 +252,14 @@ QUESTION_MARK = chr(0x3f)
 
 # unicode -> default GSM 03.38
 def_regular_encode_dict = \
-    dict((u, g) for g, u in def_regular_decode_dict.iteritems())
+    dict((u, g) for g, u in six.iteritems(def_regular_decode_dict))
 
 # unicode -> default escaped GSM 03.38 characters
 def_escape_encode_dict = \
-    dict((u, g) for g, u in def_escape_decode_dict.iteritems())
+    dict((u, g) for g, u in six.iteritems(def_escape_decode_dict))
 
 
-def encode(input_, errors='strict'):
+def encode(input_, errors='strict'):  # pragma: needs cover
     """
     :type input_: unicode
     :return: string
@@ -288,7 +297,7 @@ def decode(input_, errors='strict'):
     while index < len(input_):
         c = input_[index]
         index += 1
-        if c == '\x1b':
+        if c == '\x1b':  # pragma: needs cover
             if index < len(input_):
                 c = input_[index]
                 index += 1
@@ -298,7 +307,7 @@ def decode(input_, errors='strict'):
         else:
             try:
                 result.append(def_regular_decode_dict[c])
-            except KeyError:
+            except KeyError:  # pragma: needs cover
                 # error handling: unassigned byte, must be > 0x7f
                 if errors == 'strict':
                     raise UnicodeError("Unrecognized GSM character")

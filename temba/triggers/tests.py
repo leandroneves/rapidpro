@@ -3,12 +3,13 @@ from __future__ import unicode_literals
 
 import time
 import json
+from uuid import uuid4
 
 from mock import patch
 from datetime import timedelta
 from django.core.urlresolvers import reverse
 from django.utils import timezone
-from temba.channels.models import Channel, ChannelEvent, CALL, ANSWER, TWITTER
+from temba.channels.models import Channel, ChannelEvent
 from temba.contacts.models import TEL_SCHEME, Contact
 from temba.flows.models import Flow, ActionSet, FlowRun
 from temba.orgs.models import Language
@@ -144,16 +145,13 @@ class TriggerTest(TembaTest):
     def test_inbound_call_trigger(self):
         self.login(self.admin)
 
-        # shouldn't see an option for inbound call triggers without a answer channel
-        response = self.client.get(reverse('triggers.trigger_create'))
-        self.assertNotContains(response, 'Start a flow after receiving a call')
-
-        # make our channel support ivr
-        self.channel.role += CALL + ANSWER
-        self.channel.save()
-
+        # inbound call trigger can be made without a call channel
         response = self.client.get(reverse('triggers.trigger_create'))
         self.assertContains(response, 'Start a flow after receiving a call')
+
+        # make our channel support ivr
+        self.channel.role += Channel.ROLE_CALL + Channel.ROLE_ANSWER
+        self.channel.save()
 
         # flow is required
         response = self.client.post(reverse('triggers.trigger_inbound_call'), dict())
@@ -198,13 +196,70 @@ class TriggerTest(TembaTest):
         # release our channel
         self.channel.release()
 
-        # we no longer have voice flows or inbound call triggers that arent archived
-        self.assertEquals(0, Flow.objects.filter(flow_type=Flow.VOICE, is_archived=False).count())
-        self.assertEquals(0, Trigger.objects.filter(trigger_type=Trigger.TYPE_INBOUND_CALL, is_archived=False).count())
+        # should still have two voice flows and triggers (they aren't archived)
+        self.assertEquals(2, Flow.objects.filter(flow_type=Flow.VOICE, is_archived=False).count())
+        self.assertEquals(2, Trigger.objects.filter(trigger_type=Trigger.TYPE_INBOUND_CALL, is_archived=False).count())
+
+    def test_referral_trigger(self):
+        self.login(self.admin)
+        flow = self.create_flow()
+
+        self.fb_channel = Channel.create(self.org, self.user, None, 'FB', None, '1234',
+                                         config={Channel.CONFIG_AUTH_TOKEN: 'auth'},
+                                         uuid='00000000-0000-0000-0000-000000001234')
+
+        create_url = reverse('triggers.trigger_referral')
+
+        post_data = dict()
+        response = self.client.post(create_url, post_data)
+        self.assertEquals(response.context['form'].errors.keys(), ['referrer_id', 'flow'])
+
+        # ok, valid referrer id and flow
+        post_data = dict(flow=flow.id, referrer_id='signup')
+        response = self.client.post(create_url, post_data)
+        self.assertNoFormErrors(response)
+
+        # assert our trigger was created
+        first_trigger = Trigger.objects.get()
+        self.assertEqual(first_trigger.trigger_type, Trigger.TYPE_REFERRAL)
+        self.assertEqual(first_trigger.flow, flow)
+        self.assertIsNone(first_trigger.channel)
+
+        # try to create the same trigger, should fail as we can only have one per referrer
+        post_data = dict(flow=flow.id, referrer_id='signup')
+        response = self.client.post(create_url, post_data)
+        self.assertEquals(response.context['form'].errors.keys(), ['__all__'])
+
+        # should work if we specify a specific channel
+        post_data['channel'] = self.fb_channel.id
+        response = self.client.post(create_url, post_data)
+        self.assertNoFormErrors(response)
+
+        # load it
+        second_trigger = Trigger.objects.get(channel=self.fb_channel)
+        self.assertEqual(second_trigger.trigger_type, Trigger.TYPE_REFERRAL)
+        self.assertEqual(second_trigger.flow, flow)
+
+        # try updating it to a null channel
+        update_url = reverse('triggers.trigger_update', args=[second_trigger.id])
+        del post_data['channel']
+        response = self.client.post(update_url, post_data)
+        self.assertEquals(response.context['form'].errors.keys(), ['__all__'])
+
+        # archive our first trigger
+        Trigger.apply_action_archive(self.admin, Trigger.objects.filter(channel=None))
+
+        # should now be able to update to a null channel
+        response = self.client.post(update_url, post_data)
+        self.assertNoFormErrors(response)
+        second_trigger.refresh_from_db()
+
+        self.assertIsNone(second_trigger.channel)
 
     def test_trigger_schedule(self):
         self.login(self.admin)
         flow = self.create_flow()
+
         chester = self.create_contact("Chester", "+250788987654")
         shinoda = self.create_contact("Shinoda", "+250234213455")
         linkin_park = self.create_group("Linkin Park", [chester, shinoda])
@@ -217,7 +272,7 @@ class TriggerTest(TembaTest):
         tommorrow_stamp = time.mktime(tommorrow.timetuple())
 
         post_data = dict()
-        post_data['omnibox'] = "g-%d,c-%d" % (linkin_park.pk, stromae.pk)
+        post_data['omnibox'] = "g-%s,c-%s" % (linkin_park.uuid, stromae.uuid)
         post_data['repeat_period'] = 'D'
         post_data['start'] = 'later'
         post_data['start_datetime_value'] = "%d" % tommorrow_stamp
@@ -227,9 +282,20 @@ class TriggerTest(TembaTest):
         self.assertFalse(Trigger.objects.all())
         self.assertFalse(Schedule.objects.all())
 
+        # survey flows should not be an option
+        flow.flow_type = Flow.SURVEY
+        flow.save()
+        response = self.client.get(reverse("triggers.trigger_schedule"))
+        self.assertEqual(0, response.context['form'].fields['flow'].queryset.all().count())
+
+        # back to normal flow type
+        flow.flow_type = Flow.FLOW
+        flow.save()
+        self.assertEqual(1, response.context['form'].fields['flow'].queryset.all().count())
+
         post_data = dict()
         post_data['flow'] = flow.pk
-        post_data['omnibox'] = "g-%d,c-%d" % (linkin_park.pk, stromae.pk)
+        post_data['omnibox'] = "g-%s,c-%s" % (linkin_park.uuid, stromae.uuid)
         post_data['start'] = 'never'
         post_data['repeat_period'] = 'O'
 
@@ -244,7 +310,7 @@ class TriggerTest(TembaTest):
 
         post_data = dict()
         post_data['flow'] = flow.pk
-        post_data['omnibox'] = "g-%d,c-%d" % (linkin_park.pk, stromae.pk)
+        post_data['omnibox'] = "g-%s,c-%s" % (linkin_park.uuid, stromae.uuid)
         post_data['start'] = 'stop'
         post_data['repeat_period'] = 'O'
 
@@ -259,7 +325,7 @@ class TriggerTest(TembaTest):
 
         post_data = dict()
         post_data['flow'] = flow.pk
-        post_data['omnibox'] = "g-%d,c-%d" % (linkin_park.pk, stromae.pk)
+        post_data['omnibox'] = "g-%s,c-%s" % (linkin_park.uuid, stromae.uuid)
         post_data['repeat_period'] = 'O'
         post_data['start'] = 'now'
         post_data['start_datetime_value'] = "%d" % now_stamp
@@ -277,7 +343,7 @@ class TriggerTest(TembaTest):
 
         post_data = dict()
         post_data['flow'] = flow.pk
-        post_data['omnibox'] = "g-%d,c-%d" % (linkin_park.pk, stromae.pk)
+        post_data['omnibox'] = "g-%s,c-%s" % (linkin_park.uuid, stromae.uuid)
         post_data['repeat_period'] = 'D'
         post_data['start'] = 'later'
         post_data['start_datetime_value'] = "%d" % tommorrow_stamp
@@ -294,7 +360,7 @@ class TriggerTest(TembaTest):
         update_url = reverse('triggers.trigger_update', args=[trigger.pk])
 
         post_data = dict()
-        post_data['omnibox'] = "g-%d,c-%d" % (linkin_park.pk, stromae.pk)
+        post_data['omnibox'] = "g-%s,c-%s" % (linkin_park.uuid, stromae.uuid)
         post_data['repeat_period'] = 'O'
         post_data['start'] = 'now'
         post_data['start_datetime_value'] = "%d" % now_stamp
@@ -304,7 +370,7 @@ class TriggerTest(TembaTest):
 
         post_data = dict()
         post_data['flow'] = flow.pk
-        post_data['omnibox'] = "g-%d" % linkin_park.pk
+        post_data['omnibox'] = "g-%s" % linkin_park.uuid
         post_data['repeat_period'] = 'O'
         post_data['start'] = 'now'
         post_data['start_datetime_value'] = "%d" % now_stamp
@@ -320,7 +386,7 @@ class TriggerTest(TembaTest):
 
         post_data = dict()
         post_data['flow'] = flow.pk
-        post_data['omnibox'] = "g-%d,c-%d" % (linkin_park.pk, stromae.pk)
+        post_data['omnibox'] = "g-%s,c-%s" % (linkin_park.uuid, stromae.uuid)
         post_data['start'] = 'never'
         post_data['repeat_period'] = 'O'
 
@@ -334,7 +400,7 @@ class TriggerTest(TembaTest):
 
         post_data = dict()
         post_data['flow'] = flow.pk
-        post_data['omnibox'] = "g-%d,c-%d" % (linkin_park.pk, stromae.pk)
+        post_data['omnibox'] = "g-%s,c-%s" % (linkin_park.uuid, stromae.uuid)
         post_data['start'] = 'stop'
         post_data['repeat_period'] = 'O'
 
@@ -348,7 +414,7 @@ class TriggerTest(TembaTest):
 
         post_data = dict()
         post_data['flow'] = flow.pk
-        post_data['omnibox'] = "g-%d,c-%d" % (linkin_park.pk, stromae.pk)
+        post_data['omnibox'] = "g-%s,c-%s" % (linkin_park.uuid, stromae.uuid)
         post_data['repeat_period'] = 'D'
         post_data['start'] = 'later'
         post_data['start_datetime_value'] = "%d" % tommorrow_stamp
@@ -363,16 +429,17 @@ class TriggerTest(TembaTest):
         self.assertEquals(trigger.contacts.all()[0].pk, stromae.pk)
 
     def test_join_group_trigger(self):
-
         self.login(self.admin)
         group = self.create_group(name='Chat', contacts=[])
 
+        favorites = self.get_flow('favorites')
+
         # create a trigger that sets up a group join flow
-        post_data = dict(keyword='join', action_join_group=group.pk, response='Thanks for joining')
+        post_data = dict(keyword='join', action_join_group=group.pk, response='Thanks for joining', flow=favorites.pk)
         self.client.post(reverse("triggers.trigger_register"), data=post_data)
 
         # did our group join flow get created?
-        flow = Flow.objects.get(flow_type=Flow.FLOW)
+        flow = Flow.objects.get(flow_type=Flow.FLOW, name='Join Chat')
 
         # check that our trigger exists and shows our group
         trigger = Trigger.objects.get(keyword='join', flow=flow)
@@ -397,8 +464,8 @@ class TriggerTest(TembaTest):
         # we should be in the group now
         self.assertEqual({group}, set(contact.user_groups.all()))
 
-        # and have one incoming and one outgoing message
-        self.assertEqual(2, contact.msgs.count())
+        # and have one incoming and one outgoing message plus an outgoing from our favorites flow
+        self.assertEqual(3, contact.msgs.count())
 
         # deleting our contact group should leave our triggers and flows since the group can be recreated
         self.client.post(reverse("contacts.contactgroup_delete", args=[group.pk]))
@@ -662,7 +729,7 @@ class TriggerTest(TembaTest):
         self.assertFalse(catch_all_trigger)
 
         Msg.create_incoming(self.channel, contact.get_urn().urn, "Hi")
-        self.assertEquals(1, Msg.all_messages.all().count())
+        self.assertEquals(1, Msg.objects.all().count())
         self.assertEquals(0, flow.runs.all().count())
 
         trigger_url = reverse("triggers.trigger_catchall")
@@ -685,7 +752,7 @@ class TriggerTest(TembaTest):
         incoming = Msg.create_incoming(self.channel, contact.get_urn().urn, "Hi")
         self.assertEquals(1, flow.runs.all().count())
         self.assertEquals(flow.runs.all()[0].contact.pk, contact.pk)
-        reply = Msg.all_messages.get(response_to=incoming)
+        reply = Msg.objects.get(response_to=incoming)
         self.assertEquals('Echo: Hi', reply.text)
 
         other_flow = Flow.copy(flow, self.admin)
@@ -749,11 +816,11 @@ class TriggerTest(TembaTest):
 
         # try a message again, this shouldn't cause anything since the contact isn't part of our group
         FlowRun.objects.all().delete()
-        Msg.all_messages.all().delete()
+        Msg.objects.all().delete()
 
         incoming = Msg.create_incoming(self.channel, contact.get_urn().urn, "Hi")
         self.assertEquals(0, FlowRun.objects.all().count())
-        self.assertFalse(Msg.all_messages.filter(response_to=incoming))
+        self.assertFalse(Msg.objects.filter(response_to=incoming))
 
         # now add the contact to the group
         group.contacts.add(contact)
@@ -762,7 +829,7 @@ class TriggerTest(TembaTest):
         incoming = Msg.create_incoming(self.channel, contact.get_urn().urn, "Hi")
         self.assertEquals(1, FlowRun.objects.all().count())
         self.assertEquals(other_flow.runs.all()[0].contact.pk, contact.pk)
-        reply = Msg.all_messages.get(response_to=incoming)
+        reply = Msg.objects.get(response_to=incoming)
         self.assertEquals('Echo: Hi', reply.text)
 
         # delete the group
@@ -773,7 +840,6 @@ class TriggerTest(TembaTest):
         self.assertFalse(group_catch_all.is_active)
 
     def test_update(self):
-
         self.login(self.admin)
         group = self.create_group(name='Chat', contacts=[])
 
@@ -922,7 +988,7 @@ class TriggerTest(TembaTest):
 
     def test_export_import(self):
         # tweak our current channel to be twitter so we can create a channel-based trigger
-        Channel.objects.filter(id=self.channel.id).update(channel_type=TWITTER)
+        Channel.objects.filter(id=self.channel.id).update(channel_type=Channel.TYPE_TWITTER)
         flow = self.create_flow()
 
         group = self.create_group("Trigger Group", [])
@@ -932,8 +998,14 @@ class TriggerTest(TembaTest):
                                          created_by=self.admin, modified_by=self.admin)
         trigger.groups.add(group)
 
+        dependencies = flow.get_dependencies()
+        del dependencies['groups']
+
+        # make sure our root flow is included
+        dependencies['flows'].add(flow)
+
         # export everything
-        export = Flow.export_definitions([flow])
+        export = self.org.export_definitions('http://rapidpro.io', **dependencies)
 
         # remove our trigger
         Trigger.objects.all().delete()
@@ -946,3 +1018,63 @@ class TriggerTest(TembaTest):
         self.assertEqual(trigger.flow, flow)
         self.assertEqual(trigger.channel, self.channel)
         self.assertEqual(list(trigger.groups.all()), [group])
+
+    @patch('temba.orgs.models.Org.get_ussd_channels')
+    def test_ussd_trigger(self, get_ussd_channels):
+        self.login(self.admin)
+
+        flow = self.get_flow('ussd_example')
+
+        # check if we have ussd section
+        get_ussd_channels.return_value = True
+        response = self.client.get(reverse('triggers.trigger_create'))
+
+        self.assertTrue(get_ussd_channels.called)
+        self.assertContains(response, 'USSD mobile initiated flow')
+
+        channel = Channel.add_config_external_channel(self.org, self.user,
+                                                      "HU", 1234, Channel.TYPE_VUMI_USSD,
+                                                      dict(account_key="11111",
+                                                           access_token=str(uuid4()),
+                                                           transport_name="ussd_transport",
+                                                           conversation_key="22222"))
+
+        # flow options should show ussd flow example
+        response = self.client.get(reverse("triggers.trigger_ussd"))
+        self.assertContains(response, flow.name)
+
+        # try a ussd code with letters instead of numbers
+        post_data = dict(channel=channel.pk, keyword='*keyword#', flow=flow.pk)
+        response = self.client.post(reverse("triggers.trigger_ussd"), data=post_data)
+        self.assertEquals(1, len(response.context['form'].errors))
+        self.assertTrue("keyword" in response.context['form'].errors)
+        self.assertEquals(response.context['form'].errors['keyword'], [u'USSD code must contain only *,# and numbers'])
+
+        # try a proper ussd code
+        post_data = dict(channel=channel.pk, keyword='*111#', flow=flow.pk)
+        response = self.client.post(reverse("triggers.trigger_ussd"), data=post_data)
+        self.assertEquals(0, len(response.context['form'].errors))
+        trigger = Trigger.objects.get(keyword='*111#')
+        self.assertEquals(flow.pk, trigger.flow.pk)
+
+        # try a duplicate ussd code
+        post_data = dict(channel=channel.pk, keyword='*111#', flow=flow.pk)
+        response = self.client.post(reverse("triggers.trigger_ussd"), data=post_data)
+        self.assertEquals(1, len(response.context['form'].errors))
+        self.assertEquals(response.context['form'].errors['keyword'],
+                          [u'An active trigger already uses this keyword on this channel.'])
+
+        # different code on same channel should work
+        post_data = dict(channel=channel.pk, keyword='*112#', flow=flow.pk)
+        response = self.client.post(reverse("triggers.trigger_ussd"), data=post_data)
+        self.assertNoFormErrors(response)
+        trigger = Trigger.objects.get(keyword='*112#')
+
+        # try a second ussd code with the same channel
+        # TODO: fix this with multichannel triggers
+        # post_data = dict(channel=channel.pk, keyword='*112#', flow=flow.pk)
+        # response = self.client.post(reverse("triggers.trigger_ussd"), data=post_data)
+        # self.assertEquals(0, len(response.context['form'].errors))
+        # self.assertEquals(2, Trigger.objects.count())
+        # trigger = Trigger.objects.get(keyword='*112#')
+        # self.assertEquals(flow.pk, trigger.flow.pk)

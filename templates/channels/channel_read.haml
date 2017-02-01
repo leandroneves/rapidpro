@@ -136,7 +136,6 @@
         -trans "Device has not synced yet"
 
     -else
-
       .device
         {{ object.get_channel_type_display }} -
         -if object.name
@@ -480,7 +479,7 @@
   {{block.super}}
 
 -if start_date
-  <script src="{{ STATIC_URL }}/js/highcharts.js"></script>
+  <script src="{{ STATIC_URL }}/bower/highcharts/highcharts.js"></script>
 
 :javascript
 
@@ -489,6 +488,15 @@
     $(".remove-sender").live('click', function(){ removalConfirmation("remove-sender", "Disable Bulk Sending")});
     $(".remove-caller").live('click', function(){ removalConfirmation("remove-caller", "Disable Voice Calling")});
 
+  {% endif %}
+
+  {% if org_perms.channels.channel_facebook_whitelist %}
+    $(".facebook-whitelist").live('click', function(){
+      var modal = new Modax('{% trans "Whitelist Domain" %}','{% url "channels.channel_facebook_whitelist" object.uuid %}');
+      modal.setIcon('icon-facebook-official');
+      modal.setRedirectOnSuccess(true);
+      modal.show();
+    });
   {% endif %}
 
   {% if start_date %}

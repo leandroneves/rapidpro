@@ -1,16 +1,18 @@
 # coding=utf-8
-from __future__ import absolute_import, unicode_literals
+from __future__ import absolute_import, print_function, unicode_literals
 
 import inspect
 import json
 import os
+import pytz
 import re
 import redis
 import shutil
 import string
+import six
 import time
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from django.conf import settings
 from django.contrib.auth.models import User
 from django.core.urlresolvers import reverse
@@ -30,8 +32,6 @@ from temba.ivr.clients import TwilioClient
 from temba.msgs.models import Msg, INCOMING
 from temba.utils import dict_to_struct
 from twilio.util import RequestValidator
-from xlrd import xldate_as_tuple
-from xlrd.sheet import XL_CELL_DATE
 
 
 class ExcludeTestRunner(DiscoverRunner):
@@ -58,7 +58,7 @@ def add_testing_flag_to_context(*args):
 
 
 def uuid(val):
-    return '00000000-00000000-00000000-%08d' % val
+    return '00000000-0000-0000-0000-%012d' % val
 
 
 class TembaTest(SmartminTest):
@@ -92,9 +92,10 @@ class TembaTest(SmartminTest):
         self.ward2 = AdminBoundary.objects.create(osm_id='171116381', name='Kabare', level=3, parent=self.district2)
         self.ward3 = AdminBoundary.objects.create(osm_id='171114281', name='Bukure', level=3, parent=self.district4)
 
-        self.org = Org.objects.create(name="Temba", timezone="Africa/Kigali", country=self.country, brand='rapidpro.io',
-                                      created_by=self.user, modified_by=self.user)
-        self.org.initialize()
+        self.org = Org.objects.create(name="Temba", timezone=pytz.timezone("Africa/Kigali"), country=self.country,
+                                      brand=settings.DEFAULT_BRAND, created_by=self.user, modified_by=self.user)
+
+        self.org.initialize(topup_size=1000)
 
         # add users to the org
         self.user.set_org(self.org)
@@ -133,7 +134,7 @@ class TembaTest(SmartminTest):
         cursor.execute('explain %s' % query)
         plan = cursor.fetchall()
         indexes = []
-        for match in re.finditer('Index Scan using (.*?) on (.*?) \(cost', unicode(plan), re.DOTALL):
+        for match in re.finditer('Index Scan using (.*?) on (.*?) \(cost', six.text_type(plan), re.DOTALL):
             index = match.group(1).strip()
             table = match.group(2).strip()
             indexes.append((table, index))
@@ -142,7 +143,6 @@ class TembaTest(SmartminTest):
         return indexes
 
     def tearDown(self):
-
         if self.get_verbosity() > 2:
             details = []
             for query in connection.queries:
@@ -152,15 +152,18 @@ class TembaTest(SmartminTest):
                     details.append(dict(query=query, indexes=indexes))
 
             for stat in details:
-                print
-                print stat['query']
+                print("")
+                print(stat['query'])
                 for table, index in stat['indexes']:
-                    print '  Index Used: %s.%s' % (table, index)
+                    print('  Index Used: %s.%s' % (table, index))
 
                 if not len(stat['indexes']):
-                    print '  No Index Used'
+                    print('  No Index Used')
 
             settings.DEBUG = False
+
+        from temba.flows.models import clear_flow_user
+        clear_flow_user()
 
     def clear_cache(self):
         """
@@ -186,8 +189,8 @@ class TembaTest(SmartminTest):
         handle.close()
 
         if substitutions:
-            for k, v in substitutions.iteritems():
-                print 'Replacing "%s" with "%s"' % (k, v)
+            for k, v in six.iteritems(substitutions):
+                print('Replacing "%s" with "%s"' % (k, v))
                 data = data.replace(k, str(v))
 
         return data
@@ -205,14 +208,14 @@ class TembaTest(SmartminTest):
         data = self.get_import_json(filename, substitutions=substitutions)
         return json.loads(data)['flows'][0]
 
-    def create_secondary_org(self):
+    def create_secondary_org(self, topup_size=None):
         self.admin2 = self.create_user("Administrator2")
         self.org2 = Org.objects.create(name="Trileet Inc.", timezone="Africa/Kigali", brand='rapidpro.io',
                                        created_by=self.admin2, modified_by=self.admin2)
         self.org2.administrators.add(self.admin2)
         self.admin2.set_org(self.org)
 
-        self.org2.initialize()
+        self.org2.initialize(topup_size=topup_size)
 
     def create_contact(self, name=None, number=None, twitter=None, urn=None, is_test=False, **kwargs):
         """
@@ -263,9 +266,9 @@ class TembaTest(SmartminTest):
             kwargs['created_on'] = timezone.now()
 
         if not kwargs['contact'].is_test:
-            kwargs['topup_id'] = kwargs['org'].decrement_credit()
+            (kwargs['topup_id'], amount) = kwargs['org'].decrement_credit()
 
-        return Msg.all_messages.create(**kwargs)
+        return Msg.objects.create(**kwargs)
 
     def create_flow(self, uuid_start=None, **kwargs):
         if 'org' not in kwargs:
@@ -288,7 +291,7 @@ class TembaTest(SmartminTest):
 
         return dict(version=8,
                     action_sets=[dict(uuid=uuid(uuid_start + 1), x=1, y=1, destination=uuid(uuid_start + 5),
-                                      actions=[dict(type='reply', msg=dict(base='What is your favorite color?'))]),
+                                      actions=[dict(type='reply', msg=dict(base="What is your favorite color?", fre="Quelle est votre couleur préférée?"))]),
                                  dict(uuid=uuid(uuid_start + 2), x=2, y=2, destination=None,
                                       actions=[dict(type='reply', msg=dict(base='I love orange too! You said: @step.value which is category: @flow.color.category You are: @step.contact.tel SMS: @step Flow: @flow'))]),
                                  dict(uuid=uuid(uuid_start + 3), x=3, y=3, destination=None,
@@ -299,8 +302,6 @@ class TembaTest(SmartminTest):
                                     label='color',
                                     finished_key=None,
                                     operand=None,
-                                    webhook=None,
-                                    webhook_action=None,
                                     response_type='',
                                     ruleset_type='wait_message',
                                     config={},
@@ -368,17 +369,27 @@ class TembaTest(SmartminTest):
 
             expected_values.append(expected)
 
+        rows = tuple(sheet.rows)
+
         actual_values = []
-        for c in range(0, sheet.ncols):
-            cell = sheet.cell(row_num, c)
+        for cell in rows[row_num]:
             actual = cell.value
 
-            if cell.ctype == XL_CELL_DATE:
-                actual = datetime(*xldate_as_tuple(actual, sheet.book.datemode))
+            if actual is None:
+                actual = ''
+
+            if isinstance(actual, datetime):
+                actual = actual
 
             actual_values.append(actual)
 
-        self.assertEqual(actual_values, expected_values)
+        for index, expected in enumerate(expected_values):
+            actual = actual_values[index]
+
+            if isinstance(expected, datetime):
+                self.assertTrue(abs(expected - actual) < timedelta(seconds=1))
+            else:
+                self.assertEqual(expected, actual)
 
 
 class FlowFileTest(TembaTest):
@@ -388,10 +399,23 @@ class FlowFileTest(TembaTest):
         self.contact = self.create_contact('Ben Haggerty', '+12065552020')
 
     def assertLastResponse(self, message):
-        response = Msg.all_messages.filter(contact=self.contact).order_by('-created_on', '-pk').first()
+        response = Msg.objects.filter(contact=self.contact).order_by('-created_on', '-pk').first()
 
         self.assertTrue("Missing response from contact.", response)
         self.assertEquals(message, response.text)
+
+    def send(self, message, contact=None):
+        if not contact:
+            contact = self.contact
+        if contact.is_test:
+            Contact.set_simulation(True)
+        incoming = self.create_msg(direction=INCOMING, contact=contact, text=message)
+
+        # evaluate the inbound message against our triggers first
+        from temba.triggers.models import Trigger
+        if not Trigger.find_and_handle(incoming):
+            Flow.find_and_handle(incoming)
+        return Msg.objects.filter(response_to=incoming).order_by('pk').first()
 
     def send_message(self, flow, message, restart_participants=False, contact=None, initiate_flow=False,
                      assert_reply=True, assert_handle=True):
@@ -400,7 +424,6 @@ class FlowFileTest(TembaTest):
         """
         if not contact:
             contact = self.contact
-
         try:
             if contact.is_test:
                 Contact.set_simulation(True)
@@ -414,6 +437,8 @@ class FlowFileTest(TembaTest):
                 flow.start(groups=[], contacts=[contact], restart_participants=restart_participants)
                 handled = Flow.find_and_handle(incoming)
 
+                Msg.mark_handled(incoming)
+
                 if assert_handle:
                     self.assertTrue(handled, "'%s' did not handle message as expected" % flow.name)
                 else:
@@ -421,7 +446,7 @@ class FlowFileTest(TembaTest):
 
             # our message should have gotten a reply
             if assert_reply:
-                replies = Msg.all_messages.filter(response_to=incoming).order_by('pk')
+                replies = Msg.objects.filter(response_to=incoming).order_by('pk')
                 self.assertGreaterEqual(len(replies), 1)
 
                 if len(replies) == 1:
@@ -433,7 +458,7 @@ class FlowFileTest(TembaTest):
 
             else:
                 # assert we got no reply
-                replies = Msg.all_messages.filter(response_to=incoming).order_by('pk')
+                replies = Msg.objects.filter(response_to=incoming).order_by('pk')
                 self.assertFalse(replies)
 
             return None
@@ -556,7 +581,7 @@ class BrowserTest(LiveServerTestCase):  # pragma: no cover
         self.click('#form-two-submit')
 
         # set up our channel for claiming
-        anon = User.objects.get(pk=settings.ANONYMOUS_USER_ID)
+        anon = User.objects.get(username=settings.ANONYMOUS_USER_NAME)
         channel = Channel.create(None, anon, 'RW', 'A', name="Test Channel", address="0785551212",
                                  claim_code='AAABBBCCC', secret="12345", gcm_id="123")
 
@@ -634,8 +659,9 @@ class MockRequestValidator(RequestValidator):
 
 class MockTwilioClient(TwilioClient):
 
-    def __init__(self, sid, token, org=None):
+    def __init__(self, sid, token, org=None, base=None):
         self.org = org
+        self.base = base
         self.applications = MockTwilioClient.MockApplications()
         self.calls = MockTwilioClient.MockCalls()
         self.accounts = MockTwilioClient.MockAccounts()
@@ -659,7 +685,7 @@ class MockTwilioClient(TwilioClient):
             return [MockTwilioClient.MockShortCode(short_code)]
 
         def update(self, sid, **kwargs):
-            print "Updating short code with sid %s" % sid
+            print("Updating short code with sid %s" % sid)
 
     class MockSMS(object):
         def __init__(self, *args):
@@ -704,8 +730,11 @@ class MockTwilioClient(TwilioClient):
         def list(self, phone_number=None):
             return [MockTwilioClient.MockPhoneNumber(phone_number)]
 
+        def search(self, **kwargs):
+            return []
+
         def update(self, sid, **kwargs):
-            print "Updating phone number with sid %s" % sid
+            print("Updating phone number with sid %s" % sid)
 
     class MockApplications(object):
         def __init__(self, *args):
@@ -722,7 +751,7 @@ class MockTwilioClient(TwilioClient):
             return MockTwilioClient.MockCall(to=to, from_=from_, url=url, status_callback=status_callback)
 
         def hangup(self, external_id):
-            print "Hanging up %s on Twilio" % external_id
+            print("Hanging up %s on Twilio" % external_id)
 
         def update(self, external_id, url):
-            print "Updating call for %s to url %s" % (external_id, url)
+            print("Updating call for %s to url %s" % (external_id, url))

@@ -99,6 +99,11 @@ findMatches = (query, data, start, lastIdx, prependChar = undefined) ->
 
   ele = $(".font-checkbox")
 
+  helpText = ele.children('.controls').children('.help-block').children('label')
+  helpText.on 'click', (event) ->
+    $(this).parent().parent('.field-input').children('.glyph.notif-checkbox').click()
+    event.preventDefault();
+
   glyphCheck = ele.children('.controls').children('.glyph.notif-checkbox')
   glyphCheck.on 'click', ->
     cell = $(this).parent('.field-input')
@@ -158,9 +163,34 @@ findMatches = (query, data, start, lastIdx, prependChar = undefined) ->
   if selected
     ele.data('select2').data(selected)
 
+@select2field = (ele) ->
+
+  url = ele.attr('url')
+  placeholder = ele.attr('placeholder')
+
+  select2 = ele.removeClass("loading").select2
+    placeholder: placeholder
+    allowClear: false
+    selectOnBlur: false
+    minimumInputLength: 0
+    multiple: false
+    initSelection: (ele, callback) ->
+      id = ele.val()
+      text = ele.attr('text')
+      callback({id:id, text:text})
+    ajax:
+      url: url
+      dataType: "json"
+      data: (term, page, context) ->
+        q = term
+        search: term
+        page: page
+      results: (response, page, context) ->
+        return response
+  id = ele.val()
+  $(ele).select2('val', id, true)
+
 ###
-
-
 @initAtMessageText = (selector, completions=null) ->
   completions = window.message_completions unless completions
 
@@ -399,19 +429,10 @@ class @Modax extends @ConfirmationModal
           if modal.listeners and modal.listeners.onFormLoaded
             modal.listeners.onFormLoaded()
 
-          modal.wireEnter()
           prepareOmnibox()
+          select2field($('.select2_field'))
       )
 
-    # trap ENTER on the form, use our modal submit
-    wireEnter: ->
-      modal = @
-      modal.ele.find("form").on('keydown', (e) ->
-        if e.keyCode == ENTER
-          modal.submit()
-          return false
-        )
- 
     submit: ->
       modal = @
       modal.ele.find('.primary').text(gettext("Processing..")).addClass("disabled")
@@ -451,7 +472,6 @@ class @Modax extends @ConfirmationModal
           if modal.listeners and modal.listeners.onCompleted
               modal.listeners.onCompleted()
           else
-            modal.wireEnter()
             modal.focusFirstInput()
       )
 

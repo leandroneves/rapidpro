@@ -25,7 +25,7 @@
             %span.caret
           %ul.dropdown-menu.label-menu{'role':'menu', 'aria-labelledby':'dlabel'}
             %li
-              %a{ href: "{% url 'flows.flow_editor' object.pk %}" }
+              %a{ href: "{% url 'flows.flow_editor' object.uuid %}" }
                 - trans "View Flow"
             %li
               %a{ href: "{% url 'contacts.contact_read' contact.uuid %}" }
@@ -34,10 +34,14 @@
 -block buttons
 
 -block extra-less
-  <link rel="stylesheet" type="text/css" href="{{STATIC_URL}}css/datatables/jquery.dataTables.css">
+  <link rel="stylesheet" type="text/css" href="{{STATIC_URL}}bower/DataTables/media/css/jquery.dataTables.css">
   -load compress
+
   -compress css
-    %link{type:'text/less', rel:'stylesheet', href:'{{STATIC_URL}}less/simulator.less', media:'all'}
+    {% lessblock %}
+      :plain
+        @import "simulator.less";
+    {% endlessblock %}
 
   -compress css inline
     {% lessblock %}

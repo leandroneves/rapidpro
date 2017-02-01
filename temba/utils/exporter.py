@@ -1,9 +1,11 @@
 from __future__ import unicode_literals
 
 import csv
+import six
 
 from django.core.files.temp import NamedTemporaryFile
-from xlwt import Workbook
+from openpyxl import Workbook
+from openpyxl.writer.write_only import WriteOnlyCell
 
 
 class TableExporter(object):
@@ -15,8 +17,8 @@ class TableExporter(object):
     When writing a to an Excel sheet, this also takes care of creating different sheets every 65535
     rows, as again, Excel file only support that many per sheet.
     """
-    MAX_XLS_COLS = 255
-    MAX_XLS_ROWS = 65535
+    MAX_XLS_COLS = 16384
+    MAX_XLS_ROWS = 1048576
 
     def __init__(self, sheet_name, columns):
         self.columns = columns
@@ -26,7 +28,7 @@ class TableExporter(object):
         self.current_sheet = 0
         self.current_row = 0
 
-        self.file = NamedTemporaryFile(delete=True)
+        self.file = NamedTemporaryFile(delete=True, suffix='.xlsx')
 
         # if this is a csv file, create our csv writer and write our header
         if self.is_csv:
@@ -35,7 +37,7 @@ class TableExporter(object):
 
         # otherwise, just open a workbook, initializing the first sheet
         else:
-            self.workbook = Workbook()
+            self.workbook = Workbook(write_only=True)
             self.sheet_number = 0
             self._add_sheet()
 
@@ -43,11 +45,13 @@ class TableExporter(object):
         self.sheet_number += 1
 
         # add our sheet
-        self.sheet = self.workbook.add_sheet(u"%s %d" % (self.sheet_name, self.sheet_number))
-        for col, label in enumerate(self.columns):
-            self.sheet.write(0, col, unicode(label))
+        self.sheet = self.workbook.create_sheet(u"%s %d" % (self.sheet_name, self.sheet_number))
 
-        self.sheet_row = 1
+        row_cells = []
+        for col, label in enumerate(self.columns):
+            row_cells.append(WriteOnlyCell(self.sheet, value=six.text_type(label)))
+        self.sheet.append(row_cells)
+        self.sheet_row = 2
 
     def write_row(self, values):
         """
@@ -61,10 +65,11 @@ class TableExporter(object):
             if self.sheet_row > TableExporter.MAX_XLS_ROWS:
                 self._add_sheet()
 
+            row_cells = []
             for col, value in enumerate(values):
-                if value is not None:
-                    self.sheet.write(self.sheet_row, col, unicode(value))
+                row_cells.append(WriteOnlyCell(self.sheet, value=six.text_type(value) if value is not None else ''))
 
+            self.sheet.append(row_cells)
             self.sheet_row += 1
 
     def save_file(self):

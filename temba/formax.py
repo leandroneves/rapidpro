@@ -1,4 +1,4 @@
-from __future__ import unicode_literals
+from __future__ import print_function, unicode_literals
 
 import time
 
@@ -10,7 +10,7 @@ from orgs.context_processors import user_group_perms_processor
 
 class FormaxMixin(object):
 
-    def derive_formax_sections(self, formax, context):
+    def derive_formax_sections(self, formax, context):  # pragma: needs cover
         return None
 
     def get_context_data(self, *args, **kwargs):
@@ -31,15 +31,15 @@ class Formax(object):
         context = user_group_perms_processor(self.request)
         self.org = context['user_org']
 
-    def add_section(self, name, url, icon, action='formax', button='Save'):
+    def add_section(self, name, url, icon, action='formax', button='Save', nobutton=False, dependents=None):
         resolver = resolve(url)
         self.request.META['HTTP_X_FORMAX'] = 1
         self.request.META['HTTP_X_PJAX'] = 1
 
         start = time.time()
 
-        open = self.request.REQUEST.get('open', None)
-        if open == name:
+        open = self.request.GET.get('open', None)
+        if open == name:  # pragma: needs cover
             action = 'open'
 
         response = resolver.func(self.request, *resolver.args, **resolver.kwargs)
@@ -48,7 +48,7 @@ class Formax(object):
         if not isinstance(response, HttpResponseRedirect):
             response.render()
             self.sections.append(dict(name=name, url=url, response=response.content,
-                                      icon=icon, action=action, button=button))
+                                      icon=icon, action=action, button=button, nobutton=nobutton, dependents=dependents))
 
         if settings.DEBUG:
-            print "%s took: %f" % (url, time.time() - start)
+            print("%s took: %f" % (url, time.time() - start))

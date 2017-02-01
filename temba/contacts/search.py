@@ -1,14 +1,16 @@
-from __future__ import unicode_literals
+from __future__ import print_function, unicode_literals
 
 import ply.lex as lex
 import pytz
 import re
+import six
 
 from datetime import timedelta
 from decimal import Decimal
 from django.core.exceptions import ObjectDoesNotExist
 from django.db.models import Q
 from ply import yacc
+from temba.locations.models import AdminBoundary
 from temba.utils import str_to_datetime
 from temba.values.models import Value
 
@@ -186,7 +188,7 @@ def generate_decimal_field_comparison(field, comparator, value):
     try:
         value = Decimal(value)
     except Exception:
-        raise SearchException("Can't convert '%s' to a decimal" % unicode(value))
+        raise SearchException("Can't convert '%s' to a decimal" % six.text_type(value))
 
     return Q(**{'values__contact_field__id': field.id, 'values__decimal_value__%s' % lookup: value})
 
@@ -197,8 +199,7 @@ def generate_datetime_field_comparison(field, comparator, value, org):
         raise SearchException("Unsupported comparator %s for datetime field" % comparator)
 
     # parse as localized date and then convert to UTC
-    tz = pytz.timezone(org.timezone)
-    local_date = str_to_datetime(value, tz, org.get_dayfirst(), fill_time=False)
+    local_date = str_to_datetime(value, org.timezone, org.get_dayfirst(), fill_time=False)
 
     # passed date wasn't parseable so don't match any contact
     if not local_date:
@@ -228,9 +229,9 @@ def generate_location_field_comparison(field, comparator, value):
     if not lookup:
         raise SearchException("Unsupported comparator %s for location field" % comparator)
 
-    return Q(**{
-        'values__contact_field__id': field.id,
-        'values__location_value__name__%s' % lookup: value})
+    locations = list(AdminBoundary.objects.filter(Q(**{'name__%s' % lookup: value})).values_list('id', flat=True))
+
+    return Q(**{'values__contact_field__id': field.id, 'values__location_value__id__in': locations})
 
 
 # ================================== Lexer definition ==================================
@@ -326,4 +327,4 @@ def lexer_test(data):  # pragma: no cover
         tok = search_lexer.token()
         if not tok:
             break
-        print tok
+        print(tok)

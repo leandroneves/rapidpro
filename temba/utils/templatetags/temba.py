@@ -1,6 +1,8 @@
 from django import template
 from django.template import TemplateSyntaxError
 from django.template.defaultfilters import register
+from django.conf import settings
+from django.core.urlresolvers import reverse
 from ...campaigns.models import Campaign
 from ...flows.models import Flow
 from ...triggers.models import Trigger
@@ -40,6 +42,31 @@ def format_seconds(seconds):
     return '%s min' % minutes
 
 
+@register.simple_tag(takes_context=True)
+def ssl_brand_url(context, url_name, args=None):
+    hostname = settings.HOSTNAME
+    if 'brand' in context:
+        hostname = context['brand'].get('domain', settings.HOSTNAME)
+
+    path = reverse(url_name, args)
+    if getattr(settings, 'SESSION_COOKIE_SECURE', False):  # pragma: needs cover
+        return "https://%s%s" % (hostname, path)
+    else:
+        return path
+
+
+@register.simple_tag(takes_context=True)
+def non_ssl_brand_url(context, url_name, args=None):
+    hostname = settings.HOSTNAME
+    if 'brand' in context:
+        hostname = context['brand'].get('domain', settings.HOSTNAME)
+
+    path = reverse(url_name, args)
+    if settings.HOSTNAME != "localhost":
+        return "http://%s%s" % (hostname, path)
+    return path  # pragma: needs cover
+
+
 def lessblock(parser, token):
     args = token.split_contents()
     if len(args) != 1:  # pragma: no cover
@@ -56,7 +83,10 @@ class LessBlockNode(template.Node):
 
     def render(self, context):
         output = self.nodelist.render(context)
-        style_output = '<style type="text/less" media="all">@import "variables.less";%s</style>' % output
+        includes = '@import (reference) "variables.less";\n'
+        includes += '@import (reference, optional) "../brands/%s/less/variables.less";\n' % context['brand']['slug']
+        includes += '@import (reference) "mixins.less";\n'
+        style_output = '<style type="text/less" media="all">\n%s\n%s</style>' % (includes, output)
         return style_output
 
 # register our tag

@@ -1,20 +1,26 @@
 from __future__ import absolute_import, unicode_literals
 
+import json
+import six
+
 from datetime import timedelta
 from django.db import models
 from django.db.models import Model
 from django.utils import timezone
 from django.utils.translation import ugettext_lazy as _
-from smartmin.models import SmartModel
 from temba.contacts.models import ContactGroup, ContactField, Contact
 from temba.flows.models import Flow
 from temba.orgs.models import Org
-from temba.utils.models import generate_uuid
+from temba.utils import on_transaction_commit
+from temba.utils.models import TembaModel
 from temba.values.models import Value
 
 
-class Campaign(SmartModel):
-    name = models.CharField(max_length=255,
+@six.python_2_unicode_compatible
+class Campaign(TembaModel):
+    MAX_NAME_LEN = 255
+
+    name = models.CharField(max_length=MAX_NAME_LEN,
                             help_text="The name of this campaign")
     group = models.ForeignKey(ContactGroup,
                               help_text="The group this campaign operates on")
@@ -23,9 +29,6 @@ class Campaign(SmartModel):
     org = models.ForeignKey(Org,
                             help_text="The organization this campaign exists for")
 
-    uuid = models.CharField(max_length=36, unique=True, default=generate_uuid,
-                            verbose_name=_("Unique Identifier"), help_text=_("The unique identifier for this object"))
-
     @classmethod
     def create(cls, org, user, name, group):
         return cls.objects.create(org=org, name=name, group=group, created_by=user, modified_by=user)
@@ -33,7 +36,7 @@ class Campaign(SmartModel):
     @classmethod
     def get_campaigns(cls, org, archived=None):
         qs = cls.objects.filter(org=org, is_active=True)
-        if archived is not None:
+        if archived is not None:  # pragma: needs cover
             qs = qs.filter(is_archived=archived)
         return qs
 
@@ -47,7 +50,7 @@ class Campaign(SmartModel):
         count = 2
         while True:
             campaigns = Campaign.objects.filter(name=name, org=org, is_active=True)
-            if ignore:
+            if ignore:  # pragma: needs cover
                 campaigns = campaigns.exclude(pk=ignore.pk)
 
             if not campaigns.exists():
@@ -64,7 +67,7 @@ class Campaign(SmartModel):
         Import campaigns from our export file
         """
         from temba.orgs.models import EARLIEST_IMPORT_VERSION
-        if exported_json.get('version', 0) < EARLIEST_IMPORT_VERSION:
+        if exported_json.get('version', 0) < EARLIEST_IMPORT_VERSION:  # pragma: needs cover
             raise ValueError(_("Unknown version (%s)" % exported_json.get('version', 0)))
 
         if 'campaigns' in exported_json:
@@ -75,13 +78,13 @@ class Campaign(SmartModel):
 
                 # first check if we have the objects by id
                 if same_site:
-                    group = ContactGroup.user_groups.filter(id=campaign_spec['group']['id'], org=org).first()
-                    if group:
+                    group = ContactGroup.user_groups.filter(uuid=campaign_spec['group']['uuid'], org=org).first()
+                    if group:  # pragma: needs cover
                         group.name = campaign_spec['group']['name']
                         group.save()
 
-                    campaign = Campaign.objects.filter(org=org, id=campaign_spec['id']).first()
-                    if campaign:
+                    campaign = Campaign.objects.filter(org=org, uuid=campaign_spec['uuid']).first()
+                    if campaign:  # pragma: needs cover
                         campaign.name = Campaign.get_unique_name(org, name, ignore=campaign)
                         campaign.save()
 
@@ -119,14 +122,23 @@ class Campaign(SmartModel):
 
                     # create our message flow for message events
                     if event_spec['event_type'] == CampaignEvent.TYPE_MESSAGE:
+
+                        message = event_spec['message']
+                        if not isinstance(message, dict):
+                            try:
+                                message = json.loads(message)
+                            except:
+                                # if it's not a language dict, turn it into one
+                                message = dict(base=message)
+
                         event = CampaignEvent.create_message_event(org, user, campaign, relative_to,
                                                                    event_spec['offset'],
                                                                    event_spec['unit'],
-                                                                   event_spec['message'],
+                                                                   message,
                                                                    event_spec['delivery_hour'])
                         event.update_flow_name()
                     else:
-                        flow = Flow.objects.filter(org=org, is_active=True, id=event_spec['flow']['id']).first()
+                        flow = Flow.objects.filter(org=org, is_active=True, uuid=event_spec['flow']['uuid']).first()
                         if flow:
                             CampaignEvent.create_flow_event(org, user, campaign, relative_to,
                                                             event_spec['offset'],
@@ -165,21 +177,30 @@ class Campaign(SmartModel):
         A json representation of this event, suitable for export. Note this only returns the ids and names
         of the dependent flows. You will want to export these flows seperately using get_all_flows()
         """
-        definition = dict(name=self.name, id=self.pk, group=dict(id=self.group.id, name=self.group.name))
+        definition = dict(name=self.name, uuid=self.uuid, group=dict(uuid=self.group.uuid, name=self.group.name))
         events = []
 
-        for event in self.events.all().order_by('flow__id'):
-            events.append(dict(id=event.pk, offset=event.offset,
+        for event in self.events.all().order_by('flow__uuid'):
+
+            message = event.message
+            if message:
+                try:
+                    message = json.loads(message)
+                except:  # pragma: needs cover
+                    message = dict(base=message)
+
+            events.append(dict(uuid=event.uuid, offset=event.offset,
                                unit=event.unit,
                                event_type=event.event_type,
                                delivery_hour=event.delivery_hour,
-                               message=event.message,
-                               flow=dict(id=event.flow.pk, name=event.flow.name),
-                               relative_to=dict(label=event.relative_to.label, key=event.relative_to.key, id=event.relative_to.pk)))
+                               message=message,
+                               flow=dict(uuid=event.flow.uuid, name=event.flow.name),
+                               relative_to=dict(label=event.relative_to.label, key=event.relative_to.key)))
+
         definition['events'] = events
         return definition
 
-    def get_all_flows(self):
+    def get_all_flows(self):  # pragma: needs cover
         """
         Unique set of flows, including single message flows
         """
@@ -193,16 +214,22 @@ class Campaign(SmartModel):
 
     def get_sorted_events(self):
         """
-        Returns campaign events sorted by their actual offset
+        Returns campaign events sorted by their actual offset with event flow definitions on the current export version
         """
         events = list(self.events.filter(is_active=True))
+
+        for evt in events:
+            if evt.flow.flow_type == Flow.MESSAGE:
+                evt.flow.ensure_current_version()
+
         return sorted(events, key=lambda e: e.relative_to.pk * 100000 + e.minute_offset())
 
-    def __unicode__(self):
+    def __str__(self):
         return self.name
 
 
-class CampaignEvent(SmartModel):
+@six.python_2_unicode_compatible
+class CampaignEvent(TembaModel):
     """
     An event within a campaign that can send a message to a contact or start them in a flow
     """
@@ -246,15 +273,15 @@ class CampaignEvent(SmartModel):
 
     delivery_hour = models.IntegerField(default=-1, help_text="The hour to send the message or flow at.")
 
-    uuid = models.CharField(max_length=36, unique=True, default=generate_uuid,
-                            verbose_name=_("Unique Identifier"), help_text=_("The unique identifier for this object"))
-
     @classmethod
     def create_message_event(cls, org, user, campaign, relative_to, offset, unit, message, delivery_hour=-1):
         if campaign.org != org:  # pragma: no cover
             raise ValueError("Org mismatch")
 
         flow = Flow.create_single_message(org, user, message)
+
+        if isinstance(message, dict):
+            message = json.dumps(message)
 
         return cls.objects.create(campaign=campaign, relative_to=relative_to, offset=offset, unit=unit,
                                   event_type=cls.TYPE_MESSAGE, message=message, flow=flow, delivery_hour=delivery_hour,
@@ -282,6 +309,15 @@ class CampaignEvent(SmartModel):
             hours.append((i, 'at %s:00 %s' % (hour, period)))
         return hours
 
+    def get_message(self):
+        message = self.message
+        try:
+            message = json.loads(message).get(self.flow.base_language, '')
+        except:
+            pass
+
+        return message
+
     def update_flow_name(self):
         """
         Updates our flow name to include our Event id, keeps flow names from colliding. No-op for non-message events.
@@ -305,7 +341,7 @@ class CampaignEvent(SmartModel):
         # by default our offset is in minutes
         offset = self.offset
 
-        if self.unit == self.UNIT_HOURS:
+        if self.unit == self.UNIT_HOURS:  # pragma: needs cover
             offset = self.offset * 60
         elif self.unit == self.UNIT_DAYS:
             offset = self.offset * 60 * 24
@@ -319,40 +355,55 @@ class CampaignEvent(SmartModel):
         return offset
 
     def calculate_scheduled_fire_for_value(self, date_value, now):
-
         date_value = self.campaign.org.parse_date(date_value)
+        tz = self.campaign.org.timezone
 
-        # if we got a date, floor to the minute
-        if date_value:
-            date_value = date_value.replace(second=0, microsecond=0)
+        # nothing to base off of, nothing to fire
+        if not date_value:
+            return None
 
+        # field is no longer active? return
         if not self.relative_to.is_active:  # pragma: no cover
             return None
 
+        # convert to our timezone
+        date_value = date_value.astimezone(tz)
+
+        # if we got a date, floor to the minute
+        date_value = date_value.replace(second=0, microsecond=0)
+
         # try to parse it to a datetime
         try:
-            if date_value:
-                if self.unit == self.UNIT_MINUTES:
-                    delta = timedelta(minutes=self.offset)
-                elif self.unit == self.UNIT_HOURS:
-                    delta = timedelta(hours=self.offset)
-                elif self.unit == self.UNIT_DAYS:
-                    delta = timedelta(days=self.offset)
-                elif self.unit == self.UNIT_WEEKS:
-                    delta = timedelta(weeks=self.offset)
+            if self.unit == CampaignEvent.UNIT_MINUTES:  # pragma: needs cover
+                delta = timedelta(minutes=self.offset)
+            elif self.unit == CampaignEvent.UNIT_HOURS:  # pragma: needs cover
+                delta = timedelta(hours=self.offset)
+            elif self.unit == CampaignEvent.UNIT_DAYS:
+                delta = timedelta(days=self.offset)
+            elif self.unit == CampaignEvent.UNIT_WEEKS:
+                delta = timedelta(weeks=self.offset)
 
-                scheduled = date_value + delta
+            scheduled = date_value + delta
 
-                if self.delivery_hour != -1:
-                    scheduled = scheduled.replace(hour=self.delivery_hour)
+            # normalize according to our timezone (puts us in the right DST timezone if our date changed)
+            if str(tz) != 'UTC':
+                scheduled = tz.normalize(scheduled)
 
-                if scheduled > now:
-                    return scheduled
+            if self.delivery_hour != -1:
+                scheduled = scheduled.replace(hour=self.delivery_hour)
+
+            # if we've changed utcoffset (DST shift), tweak accordingly (this keeps us at the same hour of the day)
+            elif str(tz) != 'UTC' and date_value.utcoffset() != scheduled.utcoffset():
+                scheduled = tz.normalize(date_value.utcoffset() - scheduled.utcoffset() + scheduled)
+
+            # ignore anything in the past
+            if scheduled > now:
+                return scheduled
 
         except Exception:  # pragma: no cover
             pass
 
-        return None
+        return None  # pragma: no cover
 
     def release(self):
         """
@@ -369,10 +420,11 @@ class CampaignEvent(SmartModel):
         date_value = EventFire.parse_relative_to_date(contact, self.relative_to.key)
         return self.calculate_scheduled_fire_for_value(date_value, timezone.now())
 
-    def __unicode__(self):
+    def __str__(self):
         return "%s == %d -> %s" % (self.relative_to, self.offset, self.flow)
 
 
+@six.python_2_unicode_compatible
 class EventFire(Model):
     event = models.ForeignKey('campaigns.CampaignEvent', related_name="event_fires",
                               help_text="The event that will be fired")
@@ -413,7 +465,7 @@ class EventFire(Model):
         Should be called anytime a campaign changes.
         """
         from temba.campaigns.tasks import update_event_fires_for_campaign
-        update_event_fires_for_campaign.delay(campaign.pk)
+        on_transaction_commit(lambda: update_event_fires_for_campaign.delay(campaign.pk))
 
     @classmethod
     def do_update_campaign_events(cls, campaign):
@@ -423,7 +475,7 @@ class EventFire(Model):
     @classmethod
     def update_eventfires_for_event(cls, event):
         from temba.campaigns.tasks import update_event_fires
-        update_event_fires.delay(event.pk)
+        on_transaction_commit(lambda: update_event_fires.delay(event.pk))
 
     @classmethod
     def do_update_eventfires_for_event(cls, event):
@@ -549,7 +601,7 @@ class EventFire(Model):
                 if scheduled and not contact.is_test:
                     EventFire.objects.create(event=event, contact=contact, scheduled=scheduled)
 
-    def __unicode__(self):
+    def __str__(self):
         return "%s - %s" % (self.event, self.contact)
 
     class Meta:

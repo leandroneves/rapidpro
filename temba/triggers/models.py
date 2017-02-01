@@ -1,6 +1,7 @@
 from __future__ import unicode_literals
 
 import regex
+import six
 
 from django.db import models
 from django.utils import timezone
@@ -14,18 +15,21 @@ from temba.msgs.models import Msg
 from temba.orgs.models import Org
 
 
+@six.python_2_unicode_compatible
 class Trigger(SmartModel):
     """
     A Trigger is used to start a user in a flow based on an event. For example, triggers might fire
     for missed calls, inboud sms messages starting with a keyword, or on a repeating schedule.
     """
-    TYPE_KEYWORD = 'K'
-    TYPE_SCHEDULE = 'S'
-    TYPE_MISSED_CALL = 'M'
-    TYPE_INBOUND_CALL = 'V'
     TYPE_CATCH_ALL = 'C'
     TYPE_FOLLOW = 'F'
+    TYPE_KEYWORD = 'K'
+    TYPE_MISSED_CALL = 'M'
     TYPE_NEW_CONVERSATION = 'N'
+    TYPE_REFERRAL = 'R'
+    TYPE_SCHEDULE = 'S'
+    TYPE_USSD_PULL = 'U'
+    TYPE_INBOUND_CALL = 'V'
 
     TRIGGER_TYPES = ((TYPE_KEYWORD, _("Keyword Trigger")),
                      (TYPE_SCHEDULE, _("Schedule Trigger")),
@@ -33,14 +37,19 @@ class Trigger(SmartModel):
                      (TYPE_MISSED_CALL, _("Missed Call Trigger")),
                      (TYPE_CATCH_ALL, _("Catch All Trigger")),
                      (TYPE_FOLLOW, _("Follow Account Trigger")),
-                     (TYPE_NEW_CONVERSATION, _("New Conversation Trigger")))
+                     (TYPE_NEW_CONVERSATION, _("New Conversation Trigger")),
+                     (TYPE_USSD_PULL, _("USSD Pull Session Trigger")),
+                     (TYPE_REFERRAL, _("Referral Trigger")))
 
     org = models.ForeignKey(Org, verbose_name=_("Org"), help_text=_("The organization this trigger belongs to"))
 
     keyword = models.CharField(verbose_name=_("Keyword"), max_length=16, null=True, blank=True,
                                help_text=_("The first word in the message text"))
 
-    flow = models.ForeignKey(Flow, verbose_name=_("Flow"), null=True, blank=True,
+    referrer_id = models.CharField(verbose_name=_("Referrer Id"), max_length=255, null=True, blank=True,
+                                   help_text=_("The referrer id that triggers us"))
+
+    flow = models.ForeignKey(Flow, verbose_name=_("Flow"),
                              help_text=_("Which flow will be started"), related_name="triggers")
 
     last_triggered = models.DateTimeField(verbose_name=_("Last Triggered"), default=None, null=True,
@@ -65,15 +74,16 @@ class Trigger(SmartModel):
     trigger_type = models.CharField(max_length=1, choices=TRIGGER_TYPES, default=TYPE_KEYWORD,
                                     verbose_name=_("Trigger Type"), help_text=_('The type of this trigger'))
 
-    channel = models.OneToOneField(Channel, verbose_name=_("Channel"), null=True, help_text=_("The associated channel"))
+    channel = models.ForeignKey(Channel, verbose_name=_("Channel"), null=True, related_name='triggers',
+                                help_text=_("The associated channel"))
 
-    def __unicode__(self):
+    def __str__(self):
         if self.trigger_type == Trigger.TYPE_KEYWORD:
             return self.keyword
-        return self.get_trigger_type_display()
+        return self.get_trigger_type_display()  # pragma: needs cover
 
-    def name(self):
-        return self.__unicode__()
+    def name(self):  # pragma: needs cover
+        return six.text_type(self)
 
     def as_json(self):
         """
@@ -81,9 +91,9 @@ class Trigger(SmartModel):
         """
         return dict(trigger_type=self.trigger_type,
                     keyword=self.keyword,
-                    flow=dict(id=self.flow.pk, name=self.flow.name),
-                    groups=[dict(id=group.pk, name=group.name) for group in self.groups.all()],
-                    channel=self.channel.pk if self.channel else None)
+                    flow=dict(uuid=self.flow.uuid, name=self.flow.name),
+                    groups=[dict(uuid=group.uuid, name=group.name) for group in self.groups.all()],
+                    channel=self.channel.uuid if self.channel else None)
 
     def trigger_scopes(self):
         """
@@ -102,7 +112,7 @@ class Trigger(SmartModel):
         self.archive_conflicts(user)
 
         # if this is new conversation trigger, register for the FB callback
-        if self.trigger_type == Trigger.TYPE_NEW_CONVERSATION:
+        if self.trigger_type == Trigger.TYPE_NEW_CONVERSATION:  # pragma: needs cover
             self.channel.set_fb_call_to_action_payload(Channel.GET_STARTED)
 
     def archive_conflicts(self, user):
@@ -119,7 +129,7 @@ class Trigger(SmartModel):
                 matches = matches.filter(keyword=self.keyword)
 
             # if this trigger has a group, only archive others with the same group
-            if self.groups.all():
+            if self.groups.all():  # pragma: needs cover
                 matches = matches.filter(groups__in=self.groups.all())
             else:
                 matches = matches.filter(groups=None)
@@ -137,7 +147,7 @@ class Trigger(SmartModel):
         Import triggers from our export file
         """
         from temba.orgs.models import EARLIEST_IMPORT_VERSION
-        if exported_json.get('version', 0) < EARLIEST_IMPORT_VERSION:
+        if exported_json.get('version', 0) < EARLIEST_IMPORT_VERSION:  # pragma: needs cover
             raise ValueError(_("Unknown version (%s)" % exported_json.get('version', 0)))
 
         # first things first, let's create our groups if necesary and map their ids accordingly
@@ -150,8 +160,8 @@ class Trigger(SmartModel):
 
                     group = None
 
-                    if same_site:
-                        group = ContactGroup.user_groups.filter(org=org, pk=group_spec['id']).first()
+                    if same_site:  # pragma: needs cover
+                        group = ContactGroup.user_groups.filter(org=org, uuid=group_spec['uuid']).first()
 
                     if not group:
                         group = ContactGroup.get_user_group(org, group_spec['name'])
@@ -159,13 +169,13 @@ class Trigger(SmartModel):
                     if not group:
                         group = ContactGroup.create_static(org, user, group_spec['name'])
 
-                    if not group.is_active:
+                    if not group.is_active:  # pragma: needs cover
                         group.is_active = True
                         group.save()
 
                     groups.append(group)
 
-                flow = Flow.objects.get(org=org, pk=trigger_spec['flow']['id'], is_active=True)
+                flow = Flow.objects.get(org=org, uuid=trigger_spec['flow']['uuid'], is_active=True)
 
                 # see if that trigger already exists
                 trigger = Trigger.objects.filter(org=org, trigger_type=trigger_spec['trigger_type'])
@@ -186,7 +196,7 @@ class Trigger(SmartModel):
                     # if we have a channel resolve it
                     channel = trigger_spec.get('channel', None)  # older exports won't have a channel
                     if channel:
-                        channel = Channel.objects.filter(pk=channel, org=org).first()
+                        channel = Channel.objects.filter(uuid=channel, org=org).first()
 
                     trigger = Trigger.objects.create(org=org, trigger_type=trigger_spec['trigger_type'],
                                                      keyword=trigger_spec['keyword'], flow=flow,
@@ -201,7 +211,7 @@ class Trigger(SmartModel):
         return Trigger.objects.filter(org=org, trigger_type=trigger_type, is_active=True, is_archived=False)
 
     @classmethod
-    def catch_triggers(cls, entity, trigger_type, channel):
+    def catch_triggers(cls, entity, trigger_type, channel, referrer_id=None, extra=None):
         if isinstance(entity, Msg):
             contact = entity.contact
             start_msg = entity
@@ -211,13 +221,16 @@ class Trigger(SmartModel):
         elif isinstance(entity, Contact):
             contact = entity
             start_msg = Msg(org=entity.org, contact=contact, channel=channel, created_on=timezone.now(), id=0)
-        else:
+        else:  # pragma: needs cover
             raise ValueError("Entity must be of type msg, call or contact")
 
         triggers = Trigger.get_triggers_of_type(entity.org, trigger_type)
 
-        if trigger_type in [Trigger.TYPE_FOLLOW, Trigger.TYPE_NEW_CONVERSATION]:
-            triggers = triggers.filter(channel=channel)
+        if trigger_type in [Trigger.TYPE_FOLLOW, Trigger.TYPE_NEW_CONVERSATION, Trigger.TYPE_REFERRAL]:
+            triggers = triggers.filter(models.Q(channel=channel) | models.Q(channel=None))
+
+        if referrer_id is not None:
+            triggers = triggers.filter(referrer_id=referrer_id)
 
         # is there a match for a group specific trigger?
         group_ids = contact.user_groups.values_list('pk', flat=True)
@@ -233,7 +246,7 @@ class Trigger(SmartModel):
 
         # only fire the first matching trigger
         if triggers:
-            triggers[0].flow.start([], [contact], start_msg=start_msg, restart_participants=True)
+            triggers[0].flow.start([], [contact], start_msg=start_msg, restart_participants=True, extra=extra)
 
         return bool(triggers)
 
@@ -250,7 +263,7 @@ class Trigger(SmartModel):
 
         keyword = words[0].lower()
 
-        if not keyword:
+        if not keyword:  # pragma: needs cover
             return False
 
         active_run_qs = FlowRun.objects.filter(is_active=True, contact=msg.contact,
@@ -316,6 +329,29 @@ class Trigger(SmartModel):
         return trigger.flow
 
     @classmethod
+    def find_trigger_for_ussd_session(cls, contact, starcode):
+        # Determine keyword from starcode
+        matched_object = regex.match('(^\*[\d\*]+\#)((?:\d+\#)*)$', starcode)
+        if matched_object:
+            keyword = matched_object.group(1)
+        else:
+            return None
+
+        matching = Trigger.objects.filter(is_archived=False, is_active=True, org=contact.org, keyword__iexact=keyword,
+                                          trigger_type=Trigger.TYPE_USSD_PULL, flow__is_archived=False,
+                                          flow__is_active=True, groups=None)
+
+        if not matching:
+            return None
+
+        trigger = matching.first()
+        trigger.last_triggered = timezone.now()
+        trigger.trigger_count += 1
+        trigger.save()
+
+        return trigger
+
+    @classmethod
     def apply_action_archive(cls, user, triggers):
         triggers.update(is_archived=True)
 
@@ -349,11 +385,11 @@ class Trigger(SmartModel):
         self.save()
 
     def fire(self):
-        if self.is_archived or not self.is_active:
+        if self.is_archived or not self.is_active:  # pragma: needs cover
             return None
 
         channels = self.flow.org.channels.all()
-        if not channels:
+        if not channels:  # pragma: needs cover
             return None
 
         groups = list(self.groups.all())
@@ -366,4 +402,4 @@ class Trigger(SmartModel):
 
             return self.flow.start(groups, contacts, restart_participants=True)
 
-        return False
+        return False  # pragma: needs cover

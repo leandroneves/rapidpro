@@ -28,7 +28,10 @@ ACTIVITY_ICONS = {
     'Delivered': 'icon-bubble-check',
     'Call': 'icon-phone',
     'IVRCall': 'icon-phone',
-    'DTMF': 'icon-phone'
+    'DTMF': 'icon-phone',
+    'Expired': 'icon-clock',
+    'Interrupted': 'icon-warning',
+    'Completed': 'icon-checkmark'
 }
 
 
@@ -59,11 +62,11 @@ def name_or_urn(contact, org):
 @register.filter
 def format_urn(urn_or_contact, org):
     if isinstance(urn_or_contact, ContactURN):
-        urn_val = urn_or_contact.get_display(org=org)
+        urn_val = urn_or_contact.get_display(org=org, international=True)
         return urn_val if urn_val != ContactURN.ANON_MASK else '\u2022' * 8  # replace *'s with prettier HTML entity
     elif isinstance(urn_or_contact, Contact):
         # will render contact's highest priority URN
-        return urn_or_contact.get_urn_display(org=org)
+        return urn_or_contact.get_urn_display(org=org, international=True)
     else:  # pragma: no cover
         raise ValueError('Must be a URN or contact')
 
@@ -93,7 +96,7 @@ def location(geo_url):
 def media_url(media):
     if media:
         # TODO: remove after migration msgs.0053
-        if media.startswith('http'):
+        if media.startswith('http'):  # pragma: needs cover
             return media
         return media.partition(':')[2]
 
@@ -102,7 +105,7 @@ def media_url(media):
 def media_content_type(media):
     if media:
         # TODO: remove after migration msgs.0053
-        if media.startswith('http'):
+        if media.startswith('http'):  # pragma: needs cover
             return 'audio/x-wav'
         return media.partition(':')[0]
 
@@ -110,15 +113,15 @@ def media_content_type(media):
 @register.filter
 def media_type(media):
     type = media_content_type(media)
-    if type == 'application/octet-stream' and media.endswith('.oga'):
+    if type == 'application/octet-stream' and media.endswith('.oga'):  # pragma: needs cover
         return 'audio'
-    if type and '/' in type:
+    if type and '/' in type:  # pragma: needs cover
         type = type.split('/')[0]
     return type
 
 
 @register.filter
-def is_supported_audio(content_type):
+def is_supported_audio(content_type):  # pragma: needs cover
     return content_type in ['audio/wav', 'audio/x-wav', 'audio/vnd.wav', 'application/octet-stream']
 
 
@@ -129,16 +132,22 @@ def is_document(media_url):
 
 
 @register.filter
-def extension(url):
+def extension(url):  # pragma: needs cover
     return url.rpartition('.')[2]
 
 
 @register.filter
 def activity_icon(item):
     name = type(item).__name__
-    if name == 'Msg':
+
+    if name == 'Broadcast':
+        if item.purged_status in ('E', 'F'):
+            name = 'Failed'
+    elif name == 'Msg':
         if item.broadcast and item.broadcast.recipient_count > 1:
             name = 'Broadcast'
+            if item.status in ('E', 'F'):
+                name = 'Failed'
         elif item.msg_type == 'V':
             if item.direction == 'I':
                 name = 'DTMF'
@@ -153,8 +162,31 @@ def activity_icon(item):
                     name = 'Failed'
                 elif item.status == 'D':
                     name = 'Delivered'
+    elif name == 'FlowRun':
+        if hasattr(item, 'run_event_type'):
+            if item.exit_type == 'C':
+                name = 'Completed'
+            elif item.exit_type == 'I':
+                name = 'Interrupted'
+            elif item.exit_type == 'E':
+                name = 'Expired'
 
     return mark_safe('<span class="glyph %s"></span>' % (ACTIVITY_ICONS.get(name, '')))
+
+
+@register.filter
+def history_class(item):
+    css = ''
+    from temba.msgs.models import Msg
+    if isinstance(item, Msg):
+        if item.media and item.media[:6] == 'video:':
+            css = '%s %s' % (css, 'video')
+        if item.direction or item.recipient_count:
+            css = '%s %s' % (css, 'msg')
+    else:
+        css = '%s %s' % (css, 'non-msg')
+
+    return css
 
 
 @register.filter

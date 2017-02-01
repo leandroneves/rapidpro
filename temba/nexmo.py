@@ -1,7 +1,6 @@
-from __future__ import unicode_literals
+from __future__ import absolute_import, print_function, unicode_literals
 
 import requests
-import six
 
 from django.utils.translation import ugettext_lazy as _
 from temba.utils.gsm7 import is_gsm7
@@ -10,12 +9,7 @@ from django.utils.http import urlencode
 
 
 class NexmoValidationError(Exception):
-
-    def __unicode__(self):  # pragma: no cover
-        return self.message
-
-    def __str__(self):
-        return six.text_type(self.__unicode__())
+    pass
 
 
 class NexmoClient(object):
@@ -49,12 +43,12 @@ class NexmoClient(object):
         response = requests.post(urljoin(NexmoClient.URL, path), params=params, headers=headers)
         return self._validate_response(response)
 
-    def update_account(self, mo_url, dr_url):
+    def update_account(self, mo_url, dr_url):  # pragma: needs cover
         path = 'account/settings/%s/%s' % (self.api_key, self.api_secret)
         params = dict(moCallBackUrl=mo_url, drCallBackUrl=dr_url)
         self._fire_post(path, params)
 
-    def get_balance(self):
+    def get_balance(self):  # pragma: needs cover
         path = "/account/get-balance/%s/%s" % (self.api_key, self.api_secret)
         response = self._fire_get(path, {})
         return response['value']
@@ -112,7 +106,7 @@ class NexmoClient(object):
         else:
             return messages[0]['message-id'], response
 
-    def search_numbers(self, country, pattern):
+    def search_numbers(self, country, pattern):  # pragma: needs cover
         path = '/number/search/%s/%s/%s?features=SMS' % (self.api_key, self.api_secret, country)
         response = self._fire_get(path, dict(pattern=pattern))
         if int(response.get('count', 0)):
@@ -130,7 +124,7 @@ class NexmoClient(object):
         path = '/number/update/%s/%s/%s/%s' % (self.api_key, self.api_secret, country, number)
         self._fire_post(path, dict(moHttpUrl=moURL))
 
-    def test_credentials(self):
+    def test_credentials(self):  # pragma: needs cover
         try:
             self.get_balance()
             return True
@@ -138,28 +132,29 @@ class NexmoClient(object):
             return False
 
 
-def __main__():
+def __main__():  # pragma: no cover
     n = NexmoClient('foo', 'foo_secret')
-    print "Valid: %s" % n.test_credentials()
-    print "Balance: %s" % n.get_balance()
+    print("Valid: %s" % n.test_credentials())
+    print("Balance: %s" % n.get_balance())
 
     numbers = n.get_numbers()
-    print "Numbers: %s" % numbers
+    print("Numbers: %s" % numbers)
 
-    print "US Numbers: %s" % n.search_numbers('US', None)
+    print("US Numbers: %s" % n.search_numbers('US', None))
 
     seattle_numbers = n.search_numbers('US', '206')
-    print "206 Numbers: %s" % seattle_numbers
+    print("206 Numbers: %s" % seattle_numbers)
 
-    print "CH Numbers: %s" % n.search_numbers('CH', None)
+    print("CH Numbers: %s" % n.search_numbers('CH', None))
 
     # print "Buying %s: %s" % (seattle_numbers[0]['msisdn'], n.buy_number('US', seattle_numbers[0]['msisdn']))
 
     # update the MO for one of our numbers
-    print "Updating Number %s: %s" % (numbers[0]['msisdn'], n.update_number('US', numbers[0]['msisdn'], 'http://rapidpro.io'))
+    print("Updating Number %s: %s"
+          % (numbers[0]['msisdn'], n.update_number('US', numbers[0]['msisdn'], 'http://rapidpro.io')))
 
     # update the MO for our account
-    print "Updating Account: %s" % n.update_account("http://rapidpro.io", "http://rapidpro.io")
+    print("Updating Account: %s" % n.update_account("http://rapidpro.io", "http://rapidpro.io"))
 
     # send a message
-    print "Sending: %s" % n.send_message('250788382382', "250788383383", "test")
+    print("Sending: %s" % n.send_message('250788382382', "250788383383", "test"))

@@ -4,29 +4,39 @@ from __future__ import absolute_import, unicode_literals
 
 import json
 import pytz
+import six
 
+from celery.app.task import Task
 from datetime import datetime, time
 from decimal import Decimal
 from django.conf import settings
+from django.core import mail
+from django.core.urlresolvers import reverse
 from django.core.paginator import Paginator
+from django.test import override_settings
 from django.utils import timezone
-from temba_expressions.evaluator import EvaluationContext, DateStyle
-from mock import patch
-from redis_cache import get_redis_connection
+from django_redis import get_redis_connection
+from mock import patch, PropertyMock
+from openpyxl import load_workbook
 from temba.contacts.models import Contact
 from temba.tests import TembaTest
-from xlrd import open_workbook
+from temba_expressions.evaluator import EvaluationContext, DateStyle
 from .cache import get_cacheable_result, get_cacheable_attr, incrby_existing
 from .email import is_valid_address
 from .exporter import TableExporter
 from .expressions import migrate_template, evaluate_template, evaluate_template_compat, get_function_listing
 from .expressions import _build_function_signature
 from .gsm7 import is_gsm7, replace_non_gsm7_accents
-from .queues import pop_task, push_task, HIGH_PRIORITY, LOW_PRIORITY
-from . import format_decimal, slugify_with, str_to_datetime, str_to_time, truncate, random_string, non_atomic_when_eager
+
+from .email import send_simple_email
+from .timezones import TimeZoneFormField, timezone_to_country_code
+from .queues import start_task, complete_task, push_task, HIGH_PRIORITY, LOW_PRIORITY, nonoverlapping_task
+from .currencies import currency_for_country
+from . import format_decimal, slugify_with, str_to_datetime, str_to_time, truncate, random_string, non_atomic_when_eager, \
+    clean_string
 from . import PageableQuery, json_to_dict, dict_to_struct, datetime_to_ms, ms_to_datetime, dict_to_json, str_to_bool
-from . import percentage, datetime_to_json_date, json_date_to_datetime, timezone_to_country_code, non_atomic_gets
-from . import datetime_to_str, chunk_list
+from . import percentage, datetime_to_json_date, json_date_to_datetime, non_atomic_gets
+from . import datetime_to_str, chunk_list, get_country_code_by_name
 
 
 class InitTest(TembaTest):
@@ -82,6 +92,30 @@ class InitTest(TembaTest):
                              str_to_datetime('01-02-2013 07:08:09.100000', tz, dayfirst=True))  # complete time provided
             self.assertEqual(tz.localize(datetime(2013, 2, 1, 0, 0, 0, 0)),
                              str_to_datetime('01-02-2013', tz, dayfirst=True, fill_time=False))  # no time filling
+
+            # just year
+            self.assertEqual(datetime(123, 1, 2, 3, 4, 5, 6, tz),
+                             str_to_datetime('123', tz))
+
+        # localizing while in DST to something outside DST
+        tz = pytz.timezone('US/Eastern')
+        with patch.object(timezone, 'now', return_value=tz.localize(datetime(2029, 11, 1, 12, 30, 0, 0))):
+            parsed = str_to_datetime('06-11-2029', tz, dayfirst=True)
+            self.assertEqual(tz.localize(datetime(2029, 11, 6, 12, 30, 0, 0)),
+                             parsed)
+
+            # assert there is no DST offset
+            self.assertFalse(parsed.tzinfo.dst(parsed))
+
+            self.assertEqual(tz.localize(datetime(2029, 11, 6, 13, 45, 0, 0)),
+                             str_to_datetime('06-11-2029 13:45', tz, dayfirst=True))
+
+        # deal with datetimes that have timezone info
+        self.assertEqual(pytz.utc.localize(datetime(2016, 11, 21, 20, 36, 51, 215681)).astimezone(tz),
+                         str_to_datetime('2016-11-21T20:36:51.215681Z', tz))
+
+        self.assertEqual(datetime(123, 1, 2, 5, 4, 5, 6, pytz.utc),
+                         str_to_datetime('123-1-2T5:4:5.000006Z', tz))
 
     def test_str_to_time(self):
         tz = pytz.timezone('Asia/Kabul')
@@ -155,22 +189,42 @@ class InitTest(TembaTest):
         # check that function calls correctly
         self.assertEqual(dispatch_func(1, arg2=2), 3)
 
-    def test_timezone_country_code(self):
-        self.assertEqual('RW', timezone_to_country_code('Africa/Kigali'))
-        self.assertEqual('US', timezone_to_country_code('America/Chicago'))
-        self.assertEqual('US', timezone_to_country_code('US/Pacific'))
-        # GMT and UTC give empty
-        self.assertEqual('', timezone_to_country_code('GMT'))
-
-        # any invalid timezones should return ""
-        self.assertEqual('', timezone_to_country_code('Nyamirambo'))
-
     def test_percentage(self):
         self.assertEquals(0, percentage(0, 100))
         self.assertEquals(0, percentage(0, 0))
         self.assertEquals(0, percentage(100, 0))
         self.assertEquals(75, percentage(75, 100))
         self.assertEquals(76, percentage(759, 1000))
+
+    def test_get_country_code_by_name(self):
+        self.assertEqual('RW', get_country_code_by_name('Rwanda'))
+        self.assertEqual('US', get_country_code_by_name('United States of America'))
+        self.assertEqual('US', get_country_code_by_name('United States'))
+        self.assertEqual('GB', get_country_code_by_name('United Kingdom'))
+        self.assertEqual('CI', get_country_code_by_name('Ivory Coast'))
+        self.assertEqual('CD', get_country_code_by_name('Democratic Republic of the Congo'))
+
+    def test_remove_control_charaters(self):
+        self.assertIsNone(clean_string(None))
+        self.assertEqual(clean_string("ngert\x07in."), "ngertin.")
+        self.assertEqual(clean_string("Norbért"), "Norbért")
+
+
+class TimezonesTest(TembaTest):
+    def test_field(self):
+        field = TimeZoneFormField(help_text="Test field")
+
+        self.assertEqual(field.choices[0], ('Pacific/Midway', u'(GMT-1100) Pacific/Midway'))
+        self.assertEqual(field.coerce("Africa/Kigali"), pytz.timezone("Africa/Kigali"))
+
+    def test_timezone_country_code(self):
+        self.assertEqual('RW', timezone_to_country_code(pytz.timezone('Africa/Kigali')))
+        self.assertEqual('US', timezone_to_country_code(pytz.timezone('America/Chicago')))
+        self.assertEqual('US', timezone_to_country_code(pytz.timezone('US/Pacific')))
+
+        # GMT and UTC give empty
+        self.assertEqual('', timezone_to_country_code(pytz.timezone('GMT')))
+        self.assertEqual('', timezone_to_country_code(pytz.timezone('UTC')))
 
 
 class TemplateTagTest(TembaTest):
@@ -240,7 +294,7 @@ class CacheTest(TembaTest):
 
     def test_incrby_existing(self):
         r = get_redis_connection()
-        r.setex('foo', 10, 100)
+        r.setex('foo', 100, 10)
         r.set('bar', 20)
 
         incrby_existing('foo', 3, r)  # positive delta
@@ -251,7 +305,7 @@ class CacheTest(TembaTest):
         self.assertEqual(r.get('foo'), '12')
         self.assertTrue(r.ttl('foo') > 0)
 
-        r.setex('foo', 0, 100)
+        r.setex('foo', 100, 0)
         incrby_existing('foo', 5, r)  # zero val key
         self.assertEqual(r.get('foo'), '5')
         self.assertTrue(r.ttl('foo') > 0)
@@ -266,15 +320,121 @@ class CacheTest(TembaTest):
 
 class EmailTest(TembaTest):
 
+    @override_settings(SEND_EMAILS=True)
+    def test_send_simple_email(self):
+        send_simple_email(['recipient@bar.com'], "Test Subject", "Test Body")
+        self.assertEquals(len(mail.outbox), 1)
+        self.assertEquals(mail.outbox[0].from_email, settings.DEFAULT_FROM_EMAIL)
+        self.assertEquals(mail.outbox[0].subject, "Test Subject")
+        self.assertEquals(mail.outbox[0].body, "Test Body")
+        self.assertEquals(mail.outbox[0].recipients(), ['recipient@bar.com'])
+
+        send_simple_email(['recipient@bar.com'], "Test Subject", "Test Body", from_email='no-reply@foo.com')
+        self.assertEquals(len(mail.outbox), 2)
+        self.assertEquals(mail.outbox[1].from_email, 'no-reply@foo.com')
+        self.assertEquals(mail.outbox[1].subject, "Test Subject")
+        self.assertEquals(mail.outbox[1].body, "Test Body")
+        self.assertEquals(mail.outbox[1].recipients(), ["recipient@bar.com"])
+
     def test_is_valid_address(self):
-        self.assertFalse(is_valid_address(None))
-        self.assertFalse(is_valid_address(""))
-        self.assertFalse(is_valid_address("abc"))
-        self.assertFalse(is_valid_address("a@b"))
-        self.assertFalse(is_valid_address(" @ .c"))
-        self.assertFalse(is_valid_address("a @b.c"))
-        self.assertTrue(is_valid_address("a@b.c"))
-        self.assertTrue(is_valid_address('"Abc@def"+label@example.com'))
+
+        self.VALID_EMAILS = [
+
+            # Cases from https://en.wikipedia.org/wiki/Email_address
+            'prettyandsimple@example.com',
+            'very.common@example.com',
+            'disposable.style.email.with+symbol@example.com',
+            'other.email-with-dash@example.com',
+            'x@example.com',
+            '"much.more unusual"@example.com',
+            '"very.unusual.@.unusual.com"@example.com'
+            '"very.(),:;<>[]\".VERY.\"very@\\ \"very\".unusual"@strange.example.com',
+            'example-indeed@strange-example.com',
+            "#!$%&'*+-/=?^_`{}|~@example.org",
+            '"()<>[]:,;@\\\"!#$%&\'-/=?^_`{}| ~.a"@example.org'
+            '" "@example.org',
+            'example@localhost',
+            'example@s.solutions',
+
+
+            # Cases from Django tests
+            'email@here.com',
+            'weirder-email@here.and.there.com',
+            'email@[127.0.0.1]',
+            'email@[2001:dB8::1]',
+            'email@[2001:dB8:0:0:0:0:0:1]',
+            'email@[::fffF:127.0.0.1]',
+            'example@valid-----hyphens.com',
+            'example@valid-with-hyphens.com',
+            'test@domain.with.idn.tld.उदाहरण.परीक्षा',
+            'email@localhost',
+            '"test@test"@example.com',
+            'example@atm.%s' % ('a' * 63),
+            'example@%s.atm' % ('a' * 63),
+            'example@%s.%s.atm' % ('a' * 63, 'b' * 10),
+            '"\\\011"@here.com',
+            'a@%s.us' % ('a' * 63)
+        ]
+
+        self.INVALID_EMAILS = [
+
+            # Cases from https://en.wikipedia.org/wiki/Email_address
+            None,
+            "",
+            "abc",
+            "a@b",
+            " @ .c",
+            "a @b.c",
+            "{@flow.email}",
+            'Abc.example.com',
+            'A@b@c@example.com',
+            'a"b(c)d,e:f;g<h>i[j\k]l@example.com'
+            'just"not"right@example.com'
+            'this is"not\allowed@example.com'
+            'this\ still\"not\\allowed@example.com'
+            '1234567890123456789012345678901234567890123456789012345678901234+x@example.com'
+            'john..doe@example.com'
+            'john.doe@example..com'
+
+            # Cases from Django tests
+            'example@atm.%s' % ('a' * 64),
+            'example@%s.atm.%s' % ('b' * 64, 'a' * 63),
+            None,
+            '',
+            'abc',
+            'abc@',
+            'abc@bar',
+            'a @x.cz',
+            'abc@.com',
+            'something@@somewhere.com',
+            'email@127.0.0.1',
+            'email@[127.0.0.256]',
+            'email@[2001:db8::12345]',
+            'email@[2001:db8:0:0:0:0:1]',
+            'email@[::ffff:127.0.0.256]',
+            'example@invalid-.com',
+            'example@-invalid.com',
+            'example@invalid.com-',
+            'example@inv-.alid-.com',
+            'example@inv-.-alid.com',
+            'test@example.com\n\n<script src="x.js">',
+            # Quoted-string format (CR not allowed)
+            '"\\\012"@here.com',
+            'trailingdot@shouldfail.com.',
+            # Max length of domain name labels is 63 characters per RFC 1034.
+            'a@%s.us' % ('a' * 64),
+            # Trailing newlines in username or domain not allowed
+            'a@b.com\n',
+            'a\n@b.com',
+            '"test@test"\n@example.com',
+            'a@[127.0.0.1]\n'
+        ]
+
+        for email in self.VALID_EMAILS:
+            self.assertTrue(is_valid_address(email), "FAILED: %s should be a valid email" % email)
+
+        for email in self.INVALID_EMAILS:
+            self.assertFalse(is_valid_address(email), "FAILED: %s should be an invalid email" % email)
 
 
 class JsonTest(TembaTest):
@@ -319,13 +479,34 @@ class JsonTest(TembaTest):
 class QueueTest(TembaTest):
 
     def test_queueing(self):
+        r = get_redis_connection()
+
         args1 = dict(task=1)
 
         # basic push and pop
         push_task(self.org, None, 'test', args1)
-        self.assertEquals(args1, pop_task('test'))
+        org_id, task = start_task('test')
+        self.assertEqual(args1, task)
+        self.assertEqual(org_id, self.org.id)
 
-        self.assertFalse(pop_task('test'))
+        # should show as having one worker on that worker
+        self.assertEqual(r.zscore('test:active', self.org.id), 1)
+
+        # there aren't any more tasks so this will actually clear our active worker count
+        self.assertFalse(start_task('test')[1])
+        self.assertIsNone(r.zscore('test:active', self.org.id))
+
+        # marking the task as complete should also be a no-op
+        complete_task('test', self.org.id)
+        self.assertIsNone(r.zscore('test:active', self.org.id))
+
+        # pop on another task and start it and complete it
+        push_task(self.org, None, 'test', args1)
+        self.assertEquals(args1, start_task('test')[1])
+        complete_task('test', self.org.id)
+
+        # should have no active workers
+        self.assertEqual(r.zscore('test:active', self.org.id), 0)
 
         # ok, try pushing and popping multiple on now
         args2 = dict(task=2)
@@ -334,10 +515,22 @@ class QueueTest(TembaTest):
         push_task(self.org, None, 'test', args2)
 
         # should come back in order of insertion
-        self.assertEquals(args1, pop_task('test'))
-        self.assertEquals(args2, pop_task('test'))
+        self.assertEquals(args1, start_task('test')[1])
+        self.assertEquals(args2, start_task('test')[1])
 
-        self.assertFalse(pop_task('test'))
+        # two active workers
+        self.assertEqual(r.zscore('test:active', self.org.id), 2)
+
+        # mark one as complete
+        complete_task('test', self.org.id)
+        self.assertEqual(r.zscore('test:active', self.org.id), 1)
+
+        # start another, this will clear our counts
+        self.assertFalse(start_task('test')[1])
+        self.assertIsNone(r.zscore('test:active', self.org.id))
+
+        complete_task('test', self.org.id)
+        self.assertIsNone(r.zscore('test:active', self.org.id))
 
         # ok, same set up
         push_task(self.org, None, 'test', args1)
@@ -352,40 +545,97 @@ class QueueTest(TembaTest):
         push_task(self.org, None, 'test', args4, LOW_PRIORITY)
 
         # high priority should be first out, then defaults, then low
-        self.assertEquals(args3, pop_task('test'))
-        self.assertEquals(args1, pop_task('test'))
-        self.assertEquals(args2, pop_task('test'))
-        self.assertEquals(args4, pop_task('test'))
+        self.assertEquals(args3, start_task('test')[1])
+        self.assertEquals(args1, start_task('test')[1])
+        self.assertEquals(args2, start_task('test')[1])
+        self.assertEquals(args4, start_task('test')[1])
 
-        self.assertFalse(pop_task('test'))
+        self.assertEqual(r.zscore('test:active', self.org.id), 4)
+
+        self.assertFalse(start_task('test')[1])
+        self.assertIsNone(r.zscore('test:active', self.org.id))
 
     def test_org_queuing(self):
+        r = get_redis_connection()
+
         self.create_secondary_org()
 
         args = [dict(task=i) for i in range(6)]
 
-        push_task(self.org, None, 'test', args[2], LOW_PRIORITY)
-        push_task(self.org, None, 'test', args[1])
+        push_task(self.org, None, 'test', args[4], LOW_PRIORITY)
+        push_task(self.org, None, 'test', args[2])
         push_task(self.org, None, 'test', args[0], HIGH_PRIORITY)
 
-        push_task(self.org2, None, 'test', args[4])
-        push_task(self.org2, None, 'test', args[3], HIGH_PRIORITY)
+        push_task(self.org2, None, 'test', args[3])
+        push_task(self.org2, None, 'test', args[1], HIGH_PRIORITY)
         push_task(self.org2, None, 'test', args[5], LOW_PRIORITY)
 
-        # order isn't guaranteed except per org when popping these off
-        curr1, curr2 = 0, 3
-
+        # order should alternate between the two orgs (based on # of active workers)
         for i in range(6):
-            task = pop_task('test')['task']
+            task = start_task('test')[1]['task']
+            self.assertEqual(i, task)
 
-            if task < 3:
-                self.assertEquals(curr1, task)
-                curr1 += 1
-            else:
-                self.assertEquals(curr2, task)
-                curr2 += 1
+        # each org should show 3 active works
+        self.assertEqual(r.zscore('test:active', self.org.id), 3)
+        self.assertEqual(r.zscore('test:active', self.org2.id), 3)
 
-        self.assertFalse(pop_task('test'))
+        self.assertFalse(start_task('test')[1])
+
+        # no more tasks to do, both should now be empty
+        self.assertIsNone(r.zscore('test:active', self.org.id))
+        self.assertIsNone(r.zscore('test:active', self.org2.id))
+
+    @patch('redis.client.StrictRedis.lock')
+    @patch('redis.client.StrictRedis.get')
+    def test_nonoverlapping_task(self, mock_redis_get, mock_redis_lock):
+        mock_redis_get.return_value = None
+        task_calls = []
+
+        @nonoverlapping_task()
+        def test_task1(foo, bar):
+            task_calls.append('1-%d-%d' % (foo, bar))
+
+        @nonoverlapping_task(name='task2', time_limit=100)
+        def test_task2(foo, bar):
+            task_calls.append('2-%d-%d' % (foo, bar))
+
+        @nonoverlapping_task(name='task3', time_limit=100, lock_key='test_key', lock_timeout=55)
+        def test_task3(foo, bar):
+            task_calls.append('3-%d-%d' % (foo, bar))
+
+        self.assertIsInstance(test_task1, Task)
+        self.assertIsInstance(test_task2, Task)
+        self.assertEqual(test_task2.name, 'task2')
+        self.assertEqual(test_task2.time_limit, 100)
+        self.assertIsInstance(test_task3, Task)
+        self.assertEqual(test_task3.name, 'task3')
+        self.assertEqual(test_task3.time_limit, 100)
+
+        test_task1(11, 12)
+        test_task2(21, bar=22)
+        test_task3(foo=31, bar=32)
+
+        mock_redis_get.assert_any_call('celery-task-lock:test_task1')
+        mock_redis_get.assert_any_call('celery-task-lock:task2')
+        mock_redis_get.assert_any_call('test_key')
+        mock_redis_lock.assert_any_call('celery-task-lock:test_task1', timeout=900)
+        mock_redis_lock.assert_any_call('celery-task-lock:task2', timeout=100)
+        mock_redis_lock.assert_any_call('test_key', timeout=55)
+
+        self.assertEqual(task_calls, ['1-11-12', '2-21-22', '3-31-32'])
+
+        # simulate task being already running
+        mock_redis_get.reset_mock()
+        mock_redis_get.return_value = 'xyz'
+        mock_redis_lock.reset_mock()
+
+        # try to run again
+        test_task1(13, 14)
+
+        # check that task is skipped
+        mock_redis_get.assert_called_once_with('celery-task-lock:test_task1')
+        self.assertEqual(mock_redis_lock.call_count, 0)
+        self.assertEqual(task_calls, ['1-11-12', '2-21-22', '3-31-32'])
 
 
 class PageableQueryTest(TembaTest):
@@ -697,12 +947,17 @@ class GSM7Test(TembaTest):
         self.assertEquals('No crazy "word" quotes.', replaced)
         self.assertTrue(is_gsm7(replaced))
 
+        # non breaking space
+        replaced = replace_non_gsm7_accents("Pour chercher du boulot, comment fais-tu ?")
+        self.assertEquals('Pour chercher du boulot, comment fais-tu ?', replaced)
+        self.assertTrue(is_gsm7(replaced))
+
 
 class ChunkTest(TembaTest):
 
     def test_chunking(self):
         curr = 0
-        for chunk in chunk_list(xrange(100), 7):
+        for chunk in chunk_list(six.moves.xrange(100), 7):
             batch_curr = curr
             for item in chunk:
                 self.assertEqual(item, curr)
@@ -718,11 +973,14 @@ class ChunkTest(TembaTest):
 
 
 class TableExporterTest(TembaTest):
+    @patch('temba.utils.exporter.TableExporter.MAX_XLS_COLS', new_callable=PropertyMock)
+    def test_csv(self, mock_max_cols):
+        test_max_cols = 255
+        mock_max_cols.return_value = test_max_cols
 
-    def test_csv(self):
         # tests writing a CSV, that is a file that has more than 255 columns
         cols = []
-        for i in range(256):
+        for i in range(test_max_cols + 1):
             cols.append("Column %d" % i)
 
         # create a new exporter
@@ -733,7 +991,7 @@ class TableExporterTest(TembaTest):
 
         # write some rows
         values = []
-        for i in range(256):
+        for i in range(test_max_cols + 1):
             values.append("Value %d" % i)
 
         exporter.write_row(values)
@@ -755,7 +1013,11 @@ class TableExporterTest(TembaTest):
             # should only be three rows
             self.assertEquals(2, idx)
 
-    def test_xls(self):
+    @patch('temba.utils.exporter.TableExporter.MAX_XLS_ROWS', new_callable=PropertyMock)
+    def test_xls(self, mock_max_rows):
+        test_max_rows = 1500
+        mock_max_rows.return_value = test_max_rows
+
         cols = []
         for i in range(32):
             cols.append("Column %d" % i)
@@ -769,26 +1031,58 @@ class TableExporterTest(TembaTest):
         for i in range(32):
             values.append("Value %d" % i)
 
-        # write out 67,000 rows, that'll make two sheets
-        for i in range(67000):
+        # write out 1050000 rows, that'll make two sheets
+        for i in range(test_max_rows + 200):
             exporter.write_row(values)
 
-        file = exporter.save_file()
-        workbook = open_workbook(file.name, 'rb')
+        exporter_file = exporter.save_file()
+        workbook = load_workbook(filename=exporter_file.name)
 
-        self.assertEquals(2, len(workbook.sheets()))
+        self.assertEquals(2, len(workbook.worksheets))
 
         # check our sheet 1 values
-        sheet1 = workbook.sheets()[0]
-        self.assertEquals(cols, sheet1.row_values(0))
-        self.assertEquals(values, sheet1.row_values(1))
+        sheet1 = workbook.worksheets[0]
 
-        self.assertEquals(65536, sheet1.nrows)
-        self.assertEquals(32, sheet1.ncols)
+        rows = tuple(sheet1.rows)
 
-        sheet2 = workbook.sheets()[1]
-        self.assertEquals(cols, sheet2.row_values(0))
-        self.assertEquals(values, sheet2.row_values(1))
+        self.assertEquals(cols, [cell.value for cell in rows[0]])
+        self.assertEquals(values, [cell.value for cell in rows[1]])
 
-        self.assertEquals(67000 + 2 - 65536, sheet2.nrows)
-        self.assertEquals(32, sheet2.ncols)
+        self.assertEquals(test_max_rows, len(list(sheet1.rows)))
+        self.assertEquals(32, len(list(sheet1.columns)))
+
+        sheet2 = workbook.worksheets[1]
+        rows = tuple(sheet2.rows)
+        self.assertEquals(cols, [cell.value for cell in rows[0]])
+        self.assertEquals(values, [cell.value for cell in rows[1]])
+
+        self.assertEquals(200 + 2, len(list(sheet2.rows)))
+        self.assertEquals(32, len(list(sheet2.columns)))
+
+
+class CurrencyTest(TembaTest):
+
+    def test_currencies(self):
+        self.assertEqual(currency_for_country('US').letter, 'USD')
+        self.assertEqual(currency_for_country('EC').letter, 'USD')
+        self.assertEqual(currency_for_country('FR').letter, 'EUR')
+        self.assertEqual(currency_for_country('DE').letter, 'EUR')
+        self.assertEqual(currency_for_country('YE').letter, 'YER')
+        self.assertEqual(currency_for_country('AF').letter, 'AFN')
+
+
+class MiddlewareTest(TembaTest):
+
+    def test_orgheader(self):
+        response = self.client.get(reverse('public.public_index'))
+        self.assertFalse(response.has_header('X-Temba-Org'))
+
+        self.login(self.superuser)
+
+        response = self.client.get(reverse('public.public_index'))
+        self.assertFalse(response.has_header('X-Temba-Org'))
+
+        self.login(self.admin)
+
+        response = self.client.get(reverse('public.public_index'))
+        self.assertEqual(response['X-Temba-Org'], six.text_type(self.org.id))

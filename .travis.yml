@@ -26,13 +26,17 @@ before_script:
 - psql -U temba postgres -c "CREATE DATABASE temba;"
 - ln -s $TRAVIS_BUILD_DIR/temba/settings.py.dev $TRAVIS_BUILD_DIR/temba/settings.py
 script:
-- node_modules/karma/bin/karma start karma.conf.coffee --single-run --browsers PhantomJS
-- coverage run manage.py test --noinput --verbosity=2
 - flake8
 - python manage.py makemigrations --dry-run | grep 'No changes detected' || (echo 'There are changes which require migrations.' && exit 1)
+- python manage.py collectstatic --noinput
+- (! python manage.py compress --extension=".haml" --settings=temba.settings_travis | grep 'Error') || exit 1
+- node_modules/karma/bin/karma start karma.conf.coffee --single-run --browsers PhantomJS
+- coverage run manage.py test --noinput --verbosity=2
 after_success:
-- coverage report -i
-- coveralls
+- coveralls --rcfile .coveragerc_failcheck
+- coverage report -i --rcfile .coveragerc
+- coverage report -i --rcfile .coveragerc_failcheck --fail-under=100
+
 notifications:
   slack:
     secure: b2/RUpO6gWEDgOI/sEWsjt2cVnwp3hOWUSMnHpVuY0pZBzzrICZ5MeqEulwCoKy+8ohaCmYUL42RzJwq1v2FITo5YDeiLrqmrkYR0Zieel/Vey+o6sBdR6y2yPvWjBmydHNvfUyMshT5iqEn4bS6bjhm57F0rLJX7mTqp19A+68=

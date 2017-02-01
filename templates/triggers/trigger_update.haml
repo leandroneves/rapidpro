@@ -114,11 +114,6 @@
 
 -block modal-script
   {{block.super}}
-  -load compress
-  -compress js
-    <script type="text/coffeescript" charset="utf-8" src="{{ STATIC_URL }}scripts/at/jquery.caret.coffee" />
-    <script type="text/coffeescript" charset="utf-8" src="{{ STATIC_URL }}scripts/at/jquery.atwho.coffee" />
-
   %script{src:"{{ STATIC_URL }}js/schedules-ui.js"}
 
   :javascript
@@ -132,6 +127,10 @@
         $("#id_groups").select2({ containerCssClass: "select2-temba-field" })
       {% endif %}
 
+      {% if object.trigger_type == 'U' %}
+        select2div("#id_channel", "520px", '{% trans "USSD channel" %}');
+      {% endif %}
+
       {% if object.trigger_type == 'M' %}
         select2div("#id_missedcall_flow", "520px", '{% trans "Flow to start" %}');
       {% endif %}
@@ -142,6 +141,10 @@
 
       {% if object.trigger_type == 'N' %}
         select2div("#id_channel", "520px", '{% trans "Social media channel" %}');
+      {% endif %}
+
+      {% if object.trigger_type == 'R' %}
+        select2div("#id_channel", "520px", '{% trans "Facebook Channel" %}');
       {% endif %}
 
       {% if object.trigger_type == 'K' or object.trigger_type == 'V' %}

@@ -1,44 +1,47 @@
-from __future__ import unicode_literals
+from __future__ import print_function, unicode_literals
 
 import json
 import logging
 import regex
+import six
 import traceback
 
 from collections import Counter
+from random import randint
 from datetime import datetime, timedelta
 from django.conf import settings
 from django.contrib import messages
 from django.core.exceptions import ValidationError
 from django.core.files.storage import default_storage
 from django.core.urlresolvers import reverse
-from django.db.models import Count, Q, Max
+from django.db.models import Count, Min, Max, Sum
 from django import forms
-from django.http import HttpResponse, HttpResponseRedirect
+from django.http import HttpResponse, HttpResponseRedirect, JsonResponse
 from django.utils import timezone
 from django.utils.text import slugify
 from django.utils.translation import ugettext_lazy as _
 from django.views.decorators.csrf import csrf_exempt
 from django.views.generic import FormView
+from functools import cmp_to_key
 from itertools import chain
 from smartmin.views import SmartCRUDL, SmartCreateView, SmartReadView, SmartListView, SmartUpdateView
 from smartmin.views import SmartDeleteView, SmartTemplateView, SmartFormView
 from temba.contacts.fields import OmniboxField
 from temba.contacts.models import Contact, ContactGroup, ContactField, TEL_SCHEME
-from temba.formax import FormaxMixin
 from temba.ivr.models import IVRCall
+from temba.ussd.models import USSDSession
 from temba.orgs.views import OrgPermsMixin, OrgObjPermsMixin, ModalMixin
 from temba.reports.models import Report
-from temba.flows.models import Flow, FlowRun, FlowRevision
+from temba.flows.models import Flow, FlowRun, FlowRevision, FlowRunCount
 from temba.flows.tasks import export_flow_results_task
 from temba.locations.models import AdminBoundary
-from temba.msgs.models import Msg, INCOMING, OUTGOING
+from temba.msgs.models import Msg, PENDING
 from temba.triggers.models import Trigger
-from temba.utils import analytics, build_json_response, percentage, datetime_to_str
+from temba.utils import analytics, percentage, datetime_to_str, on_transaction_commit
 from temba.utils.expressions import get_function_listing
 from temba.utils.views import BaseActionForm
 from temba.values.models import Value
-from .models import FlowStep, RuleSet, ActionLog, ExportFlowResultsTask, FlowLabel, FlowStart
+from .models import FlowStep, RuleSet, ActionLog, ExportFlowResultsTask, FlowLabel, FlowStart, FlowPathRecentStep
 
 logger = logging.getLogger(__name__)
 
@@ -129,18 +132,31 @@ class FlowActionMixin(SmartListView):
 
         form = FlowActionForm(self.request.POST, org=org, user=user)
 
+        toast = None
+        ignored = []
         if form.is_valid():
-            form.execute()
+            changed = form.execute().get('changed')
+            for flow in form.cleaned_data['objects']:
+                if flow.id not in changed:
+                    ignored.append(flow.name)
 
-        return self.get(request, *args, **kwargs)
+            if form.cleaned_data['action'] == 'archive' and ignored:
+                if len(ignored) > 1:
+                    toast = _('%s are used inside a campaign. To archive them, first remove them from your campaigns.' % ' and '.join(ignored))
+                else:
+                    toast = _('%s is used inside a campaign. To archive it, first remove it from your campaigns.' % ignored[0])
+
+        response = self.get(request, *args, **kwargs)
+
+        if toast:
+            response['Temba-Toast'] = toast
+
+        return response
 
 
 class RuleCRUDL(SmartCRUDL):
-    actions = ('results', 'analytics', 'map', 'choropleth')
+    actions = ('results', 'analytics', 'choropleth')
     model = RuleSet
-
-    class Map(OrgPermsMixin, SmartReadView):
-        pass
 
     class Results(OrgPermsMixin, SmartReadView):
 
@@ -153,7 +169,7 @@ class RuleCRUDL(SmartCRUDL):
             return dict(id=ruleset.pk, label=ruleset.label, results=results)
 
         def render_to_response(self, context, **response_kwargs):
-            response = HttpResponse(json.dumps(context), content_type='application/javascript')
+            response = HttpResponse(json.dumps(context), content_type='application/json')
             return response
 
     class Choropleth(OrgPermsMixin, SmartReadView):
@@ -175,9 +191,9 @@ class RuleCRUDL(SmartCRUDL):
             ward_field = ContactField.objects.filter(org=org, value_type=Value.TYPE_WARD).first()
             # by default, segment by states
             segment = dict(location=state_field.label)
-            if parent.level == 1:
+            if parent.level == 1:  # pragma: needs cover
                 segment = dict(location=district_field.label, parent=parent.osm_id)
-            if parent.level == 2:
+            if parent.level == 2:  # pragma: needs cover
                 segment = dict(location=ward_field.label, parent=parent.osm_id)
 
             results = Value.get_value_summary(ruleset=ruleset, filters=filters, segment=segment)
@@ -261,7 +277,7 @@ class RuleCRUDL(SmartCRUDL):
             # group our rules by flow, calculating # of contacts participating in each flow
             for rule in rules:
                 if current_flow is None or current_flow['id'] != rule.flow_id:
-                    if current_flow and len(current_flow['rules']) > 0:
+                    if current_flow and len(current_flow['rules']) > 0:  # pragma: needs cover
                         flow_json.append(current_flow)
 
                     flow = rule.flow
@@ -286,12 +302,12 @@ class RuleCRUDL(SmartCRUDL):
 
             reports = Report.objects.filter(is_active=True, org=org).order_by('title')
             reports_json = []
-            for report in reports:
+            for report in reports:  # pragma: needs cover
                 reports_json.append(report.as_json())
 
             current_report = None
-            edit_report = self.request.REQUEST.get('edit_report', None)
-            if edit_report and int(edit_report):
+            edit_report = self.request.GET.get('edit_report', None)
+            if edit_report and int(edit_report):  # pragma: needs cover
                 request_report = Report.objects.filter(pk=edit_report, org=org).first()
                 if request_report:
                     current_report = json.dumps(request_report.as_json())
@@ -308,7 +324,7 @@ def msg_log_cmp(a, b):
     if a.__class__ == b.__class__:
         return a.pk - b.pk
     else:
-        if a.created_on == b.created_on:
+        if a.created_on == b.created_on:  # pragma: needs cover
             return 0
         elif a.created_on < b.created_on:
             return -1
@@ -316,7 +332,7 @@ def msg_log_cmp(a, b):
             return 1
 
 
-class PartialTemplate(SmartTemplateView):
+class PartialTemplate(SmartTemplateView):  # pragma: no cover
 
     def pre_process(self, request, *args, **kwargs):
         self.template = kwargs['template']
@@ -328,58 +344,41 @@ class PartialTemplate(SmartTemplateView):
 
 class FlowCRUDL(SmartCRUDL):
     actions = ('list', 'archived', 'copy', 'create', 'delete', 'update', 'simulate', 'export_results',
-               'upload_action_recording', 'read', 'editor', 'results', 'json', 'broadcast', 'activity', 'filter',
-               'completion', 'revisions', 'recent_messages')
+               'upload_action_recording', 'read', 'editor', 'results', 'run_table', 'json', 'broadcast', 'activity',
+               'activity_chart', 'filter', 'campaign', 'completion', 'revisions', 'recent_messages')
 
     model = Flow
 
     class RecentMessages(OrgObjPermsMixin, SmartReadView):
         def get(self, request, *args, **kwargs):
-            step_uuid = request.REQUEST.get('step', None)
-            next_uuid = request.REQUEST.get('destination', None)
-            rule_uuid = request.REQUEST.get('rule', None)
+            org = self.get_object_org()
+
+            step_uuid = request.GET.get('step')
+            next_uuid = request.GET.get('destination')
+            rule_uuids = request.GET.get('rule')
 
             recent_messages = []
 
-            # noop if we are missing needed parameters
-            if not step_uuid or not next_uuid:
-                return build_json_response(recent_messages)
+            if (step_uuid or rule_uuids) and next_uuid:
+                from_uuids = rule_uuids.split(',') if rule_uuids else [step_uuid]
+                to_uuids = [next_uuid]
+                recent = FlowPathRecentStep.get_recent_messages(from_uuids, to_uuids, limit=5)
 
-            if rule_uuid:
-                rule_uuids = rule_uuid.split(',')
-                recent_steps = FlowStep.objects.filter(step_uuid=step_uuid,
-                                                       next_uuid=next_uuid,
-                                                       rule_uuid__in=rule_uuids).order_by('-left_on')[:20].prefetch_related('messages', 'contact')
-                msg_direction_filter = INCOMING
+                for msg in recent:
+                    recent_messages.append(dict(sent=datetime_to_str(msg.created_on, tz=org.timezone), text=msg.text))
 
-            else:
-                recent_steps = FlowStep.objects.filter(step_uuid=step_uuid,
-                                                       next_uuid=next_uuid,
-                                                       rule_uuid=None).order_by('-left_on')[:20].prefetch_related('messages', 'contact')
-
-                msg_direction_filter = OUTGOING
-
-            # this is slightly goofy for performance reasons, we don't want to do the big join, so instead use the
-            # prefetch related above and do the filtering ourselves
-            for step in recent_steps:
-                if not step.contact.is_test:
-                    for msg in step.messages.all():
-                        if msg.visibility == Msg.VISIBILITY_VISIBLE and msg.direction == msg_direction_filter:
-                            recent_messages.append(dict(sent=datetime_to_str(msg.created_on),
-                                                        text=msg.text))
-
-            return build_json_response(recent_messages[:5])
+            return JsonResponse(recent_messages, safe=False)
 
     class Revisions(OrgObjPermsMixin, SmartReadView):
 
         def get(self, request, *args, **kwargs):
             flow = self.get_object()
 
-            revision_id = request.REQUEST.get('definition', None)
+            revision_id = request.GET.get('definition', None)
 
             if revision_id:
                 revision = FlowRevision.objects.get(flow=flow, pk=revision_id)
-                return build_json_response(revision.get_definition_json())
+                return JsonResponse(revision.get_definition_json())
             else:
                 revisions = []
                 for revision in flow.revisions.all().order_by('-created_on')[:25]:
@@ -397,12 +396,12 @@ class FlowCRUDL(SmartCRUDL):
                         logger.exception("Error validating flow revision: %s [%d]" % (flow.uuid, revision.id))
                         pass
 
-                return build_json_response(revisions)
+                return JsonResponse(revisions, safe=False)
 
     class OrgQuerysetMixin(object):
         def derive_queryset(self, *args, **kwargs):
             queryset = super(FlowCRUDL.OrgQuerysetMixin, self).derive_queryset(*args, **kwargs)
-            if not self.request.user.is_authenticated():
+            if not self.request.user.is_authenticated():  # pragma: needs cover
                 return queryset.exclude(pk__gt=0)
             else:
                 return queryset.filter(org=self.request.user.get_org())
@@ -415,6 +414,7 @@ class FlowCRUDL(SmartCRUDL):
             flow_type = forms.ChoiceField(label=_('Run flow over'),
                                           help_text=_('Send messages, place phone calls, or submit Surveyor runs'),
                                           choices=((Flow.FLOW, 'Messaging'),
+                                                   (Flow.USSD, 'USSD Messaging'),
                                                    (Flow.VOICE, 'Phone Call'),
                                                    (Flow.SURVEY, 'Surveyor')))
 
@@ -433,7 +433,7 @@ class FlowCRUDL(SmartCRUDL):
                 fields = ('name', 'keyword_triggers', 'expires_after_minutes', 'flow_type', 'base_language')
 
         form_class = FlowCreateForm
-        success_url = 'id@flows.flow_editor'
+        success_url = 'uuid@flows.flow_editor'
         success_message = ''
         field_config = dict(name=dict(help=_("Choose a name to describe this flow, e.g. Demographic Survey")))
 
@@ -460,11 +460,11 @@ class FlowCRUDL(SmartCRUDL):
             analytics.track(self.request.user.username, 'temba.flow_created', dict(name=obj.name))
             org = self.request.user.get_org()
 
-            if not obj.flow_type:
+            if not obj.flow_type:  # pragma: needs cover
                 obj.flow_type = Flow.FLOW
 
             # if we don't have a language, use base
-            if not obj.base_language:
+            if not obj.base_language:  # pragma: needs cover
                 obj.base_language = 'base'
 
             self.object = Flow.create(org, self.request.user, obj.name,
@@ -475,16 +475,17 @@ class FlowCRUDL(SmartCRUDL):
             user = self.request.user
             org = user.get_org()
 
-            # create triggers for this flow only if there are keywords
-            if len(self.form.cleaned_data['keyword_triggers']) > 0:
-                for keyword in self.form.cleaned_data['keyword_triggers'].split(','):
-                    Trigger.objects.create(org=org, keyword=keyword, flow=obj, created_by=user, modified_by=user)
+            # create triggers for this flow only if there are keywords and we aren't a survey
+            if self.form.cleaned_data.get('flow_type') != Flow.SURVEY:
+                if len(self.form.cleaned_data['keyword_triggers']) > 0:
+                    for keyword in self.form.cleaned_data['keyword_triggers'].split(','):
+                        Trigger.objects.create(org=org, keyword=keyword, flow=obj, created_by=user, modified_by=user)
 
             return obj
 
     class Delete(ModalMixin, OrgObjPermsMixin, SmartDeleteView):
         fields = ('pk',)
-        cancel_url = 'id@flows.flow_editor'
+        cancel_url = 'uuid@flows.flow_editor'
         redirect_url = '@flows.flow_list'
         default_template = 'smartmin/delete_confirm.html'
         success_message = _("Your flow has been removed.")
@@ -504,15 +505,10 @@ class FlowCRUDL(SmartCRUDL):
             copy = Flow.copy(self.object, self.request.user)
 
             # redirect to the newly created flow
-            return HttpResponseRedirect(reverse('flows.flow_editor', args=[copy.pk]))
+            return HttpResponseRedirect(reverse('flows.flow_editor', args=[copy.uuid]))
 
     class Update(ModalMixin, OrgObjPermsMixin, SmartUpdateView):
         class FlowUpdateForm(BaseFlowForm):
-            keyword_triggers = forms.CharField(
-                required=False,
-                label=_("Global keyword triggers"),
-                help_text=_("When a user sends any of these keywords they will begin this flow")
-            )
 
             def __init__(self, user, *args, **kwargs):
                 super(FlowCRUDL.Update.FlowUpdateForm, self).__init__(*args, **kwargs)
@@ -542,26 +538,32 @@ class FlowCRUDL(SmartCRUDL):
                     )
 
                     self.fields[Flow.CONTACT_CREATION] = contact_creation
-
-                self.fields['keyword_triggers'].initial = ','.join([t.keyword for t in flow_triggers])
+                else:
+                    self.fields['keyword_triggers'] = forms.CharField(required=False,
+                                                                      label=_("Global keyword triggers"),
+                                                                      help_text=_("When a user sends any of these keywords they will begin this flow"),
+                                                                      initial=','.join([t.keyword for t in flow_triggers]))
 
             class Meta:
                 model = Flow
-                fields = ('name', 'keyword_triggers', 'labels', 'base_language', 'expires_after_minutes', 'ignore_triggers')
+                fields = ('name', 'labels', 'base_language', 'expires_after_minutes', 'ignore_triggers')
 
         success_message = ''
-        fields = ('name', 'keyword_triggers', 'expires_after_minutes', 'ignore_triggers')
+        fields = ('name', 'expires_after_minutes')
         form_class = FlowUpdateForm
 
         def derive_fields(self):
             fields = [field for field in self.fields]
 
             obj = self.get_object()
-            if not obj.base_language and self.org.primary_language:
+            if not obj.base_language and self.org.primary_language:  # pragma: needs cover
                 fields += ['base_language']
 
             if obj.flow_type == Flow.SURVEY:
                 fields.insert(len(fields) - 1, Flow.CONTACT_CREATION)
+            else:
+                fields.insert(1, 'keyword_triggers')
+                fields.append('ignore_triggers')
 
             return fields
 
@@ -583,41 +585,44 @@ class FlowCRUDL(SmartCRUDL):
             keywords = set()
             user = self.request.user
             org = user.get_org()
-            existing_keywords = set(t.keyword for t in obj.triggers.filter(org=org, flow=obj,
-                                                                           trigger_type=Trigger.TYPE_KEYWORD,
-                                                                           is_archived=False, groups=None))
 
-            if len(self.form.cleaned_data['keyword_triggers']) > 0:
-                keywords = set(self.form.cleaned_data['keyword_triggers'].split(','))
+            if 'keyword_triggers' in self.form.cleaned_data:
 
-            removed_keywords = existing_keywords.difference(keywords)
-            for keyword in removed_keywords:
-                obj.triggers.filter(org=org, flow=obj, keyword=keyword,
-                                    groups=None, is_archived=False).update(is_archived=True)
+                existing_keywords = set(t.keyword for t in obj.triggers.filter(org=org, flow=obj,
+                                                                               trigger_type=Trigger.TYPE_KEYWORD,
+                                                                               is_archived=False, groups=None))
 
-            added_keywords = keywords.difference(existing_keywords)
-            archived_keywords = [t.keyword for t in obj.triggers.filter(org=org, flow=obj, trigger_type=Trigger.TYPE_KEYWORD,
-                                                                        is_archived=True, groups=None)]
-            for keyword in added_keywords:
-                # first check if the added keyword is not amongst archived
-                if keyword in archived_keywords:
-                    obj.triggers.filter(org=org, flow=obj, keyword=keyword, groups=None).update(is_archived=False)
-                else:
-                    Trigger.objects.create(org=org, keyword=keyword, trigger_type=Trigger.TYPE_KEYWORD,
-                                           flow=obj, created_by=user, modified_by=user)
+                if len(self.form.cleaned_data['keyword_triggers']) > 0:
+                    keywords = set(self.form.cleaned_data['keyword_triggers'].split(','))
+
+                removed_keywords = existing_keywords.difference(keywords)
+                for keyword in removed_keywords:
+                    obj.triggers.filter(org=org, flow=obj, keyword=keyword,
+                                        groups=None, is_archived=False).update(is_archived=True)
+
+                added_keywords = keywords.difference(existing_keywords)
+                archived_keywords = [t.keyword for t in obj.triggers.filter(org=org, flow=obj, trigger_type=Trigger.TYPE_KEYWORD,
+                                                                            is_archived=True, groups=None)]
+                for keyword in added_keywords:
+                    # first check if the added keyword is not amongst archived
+                    if keyword in archived_keywords:  # pragma: needs cover
+                        obj.triggers.filter(org=org, flow=obj, keyword=keyword, groups=None).update(is_archived=False)
+                    else:
+                        Trigger.objects.create(org=org, keyword=keyword, trigger_type=Trigger.TYPE_KEYWORD,
+                                               flow=obj, created_by=user, modified_by=user)
 
             # run async task to update all runs
             from .tasks import update_run_expirations_task
-            update_run_expirations_task.delay(obj.pk)
+            on_transaction_commit(lambda: update_run_expirations_task.delay(obj.pk))
 
             return obj
 
     class UploadActionRecording(OrgPermsMixin, SmartUpdateView):
-        def post(self, request, *args, **kwargs):
-            path = self.save_recording_upload(self.request.FILES['file'], self.request.REQUEST.get('actionset'), self.request.REQUEST.get('action'))
-            return build_json_response(dict(path=path))
+        def post(self, request, *args, **kwargs):  # pragma: needs cover
+            path = self.save_recording_upload(self.request.FILES['file'], self.request.POST.get('actionset'), self.request.POST.get('action'))
+            return JsonResponse(dict(path=path))
 
-        def save_recording_upload(self, file, actionset_id, action_uuid):
+        def save_recording_upload(self, file, actionset_id, action_uuid):  # pragma: needs cover
             flow = self.get_object()
             return default_storage.save('recordings/%d/%d/steps/%s.wav' % (flow.org.pk, flow.id, action_uuid), file)
 
@@ -634,9 +639,20 @@ class FlowCRUDL(SmartCRUDL):
             context['org_has_flows'] = Flow.objects.filter(org=self.request.user.get_org(), is_active=True).count()
             context['folders'] = self.get_folders()
             context['labels'] = self.get_flow_labels()
+            context['campaigns'] = self.get_campaigns()
             context['request_url'] = self.request.path
             context['actions'] = self.actions
             return context
+
+        def derive_queryset(self, *args, **kwargs):
+            return super(FlowCRUDL.BaseList, self).derive_queryset(*args, **kwargs).exclude(flow_type=Flow.MESSAGE)
+
+        def get_campaigns(self):
+            from temba.campaigns.models import CampaignEvent
+            org = self.request.user.get_org()
+            events = CampaignEvent.objects.filter(campaign__org=org, is_active=True, campaign__is_active=True,
+                                                  flow__is_archived=False, flow__is_active=True, flow__flow_type=Flow.FLOW)
+            return events.values('campaign__name', 'campaign__id').annotate(count=Count('id')).order_by('campaign__name')
 
         def get_flow_labels(self):
             labels = []
@@ -648,8 +664,14 @@ class FlowCRUDL(SmartCRUDL):
             org = self.request.user.get_org()
 
             return [
-                dict(label="Active", url=reverse('flows.flow_list'), count=Flow.objects.filter(is_active=True, is_archived=False, flow_type=Flow.FLOW, org=org).count()),
-                dict(label="Archived", url=reverse('flows.flow_archived'), count=Flow.objects.filter(is_active=True, is_archived=True, org=org).count())
+                dict(label="Active", url=reverse('flows.flow_list'),
+                     count=Flow.objects.exclude(flow_type=Flow.MESSAGE).filter(is_active=True,
+                                                                               is_archived=False,
+                                                                               org=org).count()),
+                dict(label="Archived", url=reverse('flows.flow_archived'),
+                     count=Flow.objects.exclude(flow_type=Flow.MESSAGE).filter(is_active=True,
+                                                                               is_archived=True,
+                                                                               org=org).count())
             ]
 
     class Archived(BaseList):
@@ -664,8 +686,44 @@ class FlowCRUDL(SmartCRUDL):
         actions = ('archive', 'label')
 
         def derive_queryset(self, *args, **kwargs):
-            return super(FlowCRUDL.List, self).derive_queryset(*args, **kwargs).filter(is_active=True,
-                                                                                       is_archived=False).exclude(flow_type=Flow.MESSAGE)
+            queryset = super(FlowCRUDL.List, self).derive_queryset(*args, **kwargs)
+            queryset = queryset.filter(is_active=True, is_archived=False)
+            types = self.request.GET.getlist('flow_type')
+            if types:
+                queryset = queryset.filter(flow_type__in=types)
+            return queryset
+
+    class Campaign(BaseList):
+        actions = ['label']
+        campaign = None
+
+        @classmethod
+        def derive_url_pattern(cls, path, action):
+            return r'^%s/%s/(?P<campaign_id>\d+)/$' % (path, action)
+
+        def derive_title(self, *args, **kwargs):
+            return self.get_campaign().name
+
+        def get_campaign(self):
+            if not self.campaign:
+                from temba.campaigns.models import Campaign
+                campaign_id = self.kwargs['campaign_id']
+                self.campaign = Campaign.objects.filter(id=campaign_id).first()
+            return self.campaign
+
+        def get_queryset(self, **kwargs):
+            from temba.campaigns.models import CampaignEvent
+            flow_ids = CampaignEvent.objects.filter(campaign=self.get_campaign(),
+                                                    flow__is_archived=False,
+                                                    flow__flow_type=Flow.FLOW).values('flow__id')
+
+            flows = Flow.objects.filter(id__in=flow_ids).order_by('-modified_on')
+            return flows
+
+        def get_context_data(self, *args, **kwargs):
+            context = super(FlowCRUDL.Campaign, self).get_context_data(*args, **kwargs)
+            context['current_campaign'] = self.get_campaign()
+            return context
 
     class Filter(BaseList):
         add_button = True
@@ -702,7 +760,7 @@ class FlowCRUDL(SmartCRUDL):
         def get_label_filter(self):
             label = FlowLabel.objects.get(pk=self.kwargs['label_id'])
             children = label.children.all()
-            if children:
+            if children:  # pragma: needs cover
                 return [l for l in FlowLabel.objects.filter(parent=label)] + [label]
             else:
                 return [label]
@@ -720,38 +778,39 @@ class FlowCRUDL(SmartCRUDL):
             org = self.request.user.get_org()
 
             contact_variables = [
-                dict(name='contact', display=unicode(_('Contact Name'))),
-                dict(name='contact.first_name', display=unicode(_('Contact First Name'))),
-                dict(name='contact.groups', display=unicode(_('Contact Groups'))),
-                dict(name='contact.language', display=unicode(_('Contact Language'))),
-                dict(name='contact.name', display=unicode(_('Contact Name'))),
-                dict(name='contact.tel', display=unicode(_('Contact Phone'))),
-                dict(name='contact.tel_e164', display=unicode(_('Contact Phone - E164'))),
-                dict(name='contact.uuid', display=unicode(_("Contact UUID"))),
-                dict(name='new_contact', display=unicode(_('New Contact')))
+                dict(name='contact', display=six.text_type(_('Contact Name'))),
+                dict(name='contact.first_name', display=six.text_type(_('Contact First Name'))),
+                dict(name='contact.groups', display=six.text_type(_('Contact Groups'))),
+                dict(name='contact.language', display=six.text_type(_('Contact Language'))),
+                dict(name='contact.mailto', display=six.text_type(_('Contact Email Address'))),
+                dict(name='contact.name', display=six.text_type(_('Contact Name'))),
+                dict(name='contact.tel', display=six.text_type(_('Contact Phone'))),
+                dict(name='contact.tel_e164', display=six.text_type(_('Contact Phone - E164'))),
+                dict(name='contact.uuid', display=six.text_type(_("Contact UUID"))),
+                dict(name='new_contact', display=six.text_type(_('New Contact')))
             ]
             contact_variables += [dict(name="contact.%s" % field.key, display=field.label) for field in ContactField.objects.filter(org=org, is_active=True)]
 
             date_variables = [
-                dict(name='date', display=unicode(_('Current Date and Time'))),
-                dict(name='date.now', display=unicode(_('Current Date and Time'))),
-                dict(name='date.today', display=unicode(_('Current Date'))),
-                dict(name='date.tomorrow', display=unicode(_("Tomorrow's Date"))),
-                dict(name='date.yesterday', display=unicode(_("Yesterday's Date")))
+                dict(name='date', display=six.text_type(_('Current Date and Time'))),
+                dict(name='date.now', display=six.text_type(_('Current Date and Time'))),
+                dict(name='date.today', display=six.text_type(_('Current Date'))),
+                dict(name='date.tomorrow', display=six.text_type(_("Tomorrow's Date"))),
+                dict(name='date.yesterday', display=six.text_type(_("Yesterday's Date")))
             ]
 
             flow_variables = [
-                dict(name='channel', display=unicode(_('Sent to'))),
-                dict(name='channel.name', display=unicode(_('Sent to'))),
-                dict(name='channel.tel', display=unicode(_('Sent to'))),
-                dict(name='channel.tel_e164', display=unicode(_('Sent to'))),
-                dict(name='step', display=unicode(_('Sent to'))),
-                dict(name='step.value', display=unicode(_('Sent to')))
+                dict(name='channel', display=six.text_type(_('Sent to'))),
+                dict(name='channel.name', display=six.text_type(_('Sent to'))),
+                dict(name='channel.tel', display=six.text_type(_('Sent to'))),
+                dict(name='channel.tel_e164', display=six.text_type(_('Sent to'))),
+                dict(name='step', display=six.text_type(_('Sent to'))),
+                dict(name='step.value', display=six.text_type(_('Sent to')))
             ]
             flow_variables += [dict(name='step.%s' % v['name'], display=v['display']) for v in contact_variables]
-            flow_variables.append(dict(name='flow', display=unicode(_('All flow variables'))))
+            flow_variables.append(dict(name='flow', display=six.text_type(_('All flow variables'))))
 
-            flow_id = self.request.REQUEST.get('flow', None)
+            flow_id = self.request.GET.get('flow', None)
 
             if flow_id:
                 # TODO: restrict this to only the possible paths to the passed in actionset uuid
@@ -764,10 +823,12 @@ class FlowCRUDL(SmartCRUDL):
                     flow_variables.append(dict(name='flow.%s.time' % key, display='%s Time' % rule_set.label))
 
             function_completions = get_function_listing()
-            return build_json_response(dict(message_completions=contact_variables + date_variables + flow_variables,
-                                            function_completions=function_completions))
+            return JsonResponse(dict(message_completions=contact_variables + date_variables + flow_variables,
+                                     function_completions=function_completions))
 
     class Read(OrgObjPermsMixin, SmartReadView):
+        slug_url_kwarg = 'uuid'
+
         def derive_title(self):
             return self.object.name
 
@@ -778,7 +839,10 @@ class FlowCRUDL(SmartCRUDL):
 
             org = self.request.user.get_org()
             context = super(FlowCRUDL.Read, self).get_context_data(*args, **kwargs)
-            initial = self.get_object(self.get_queryset()).as_json(expand_contacts=True)
+            flow = self.get_object(self.get_queryset())
+            flow.ensure_current_version()
+
+            initial = flow.as_json(expand_contacts=True)
             initial['archived'] = self.object.is_archived
             context['initial'] = json.dumps(initial)
             context['flows'] = Flow.objects.filter(org=org, is_active=True, flow_type__in=[Flow.FLOW, Flow.VOICE], is_archived=False)
@@ -805,7 +869,7 @@ class FlowCRUDL(SmartCRUDL):
             # are there pending starts?
             starting = False
             start = self.object.starts.all().order_by('-created_on')
-            if start.exists() and start[0].status in [FlowStart.STATUS_STARTING, FlowStart.STATUS_PENDING]:
+            if start.exists() and start[0].status in [FlowStart.STATUS_STARTING, FlowStart.STATUS_PENDING]:  # pragma: needs cover
                 starting = True
             context['starting'] = starting
 
@@ -813,10 +877,11 @@ class FlowCRUDL(SmartCRUDL):
 
         def get_gear_links(self):
             links = []
+            flow = self.get_object()
 
-            if self.get_object().flow_type != 'S' \
+            if flow.flow_type not in [Flow.SURVEY, Flow.USSD] \
                     and self.has_org_perm('flows.flow_broadcast') \
-                    and not self.get_object().is_archived:
+                    and not flow.is_archived:
 
                 links.append(dict(title=_("Start Flow"),
                                   style='btn-primary',
@@ -826,7 +891,7 @@ class FlowCRUDL(SmartCRUDL):
             if self.has_org_perm('flows.flow_results'):
                 links.append(dict(title=_("Results"),
                                   style='btn-primary',
-                                  href=reverse('flows.flow_results', args=[self.get_object().id])))
+                                  href=reverse('flows.flow_results', args=[flow.id])))
             if len(links) > 1:
                 links.append(dict(divider=True)),
 
@@ -838,11 +903,11 @@ class FlowCRUDL(SmartCRUDL):
             if self.has_org_perm('flows.flow_copy'):
                 links.append(dict(title=_("Copy"),
                                   posterize=True,
-                                  href=reverse('flows.flow_copy', args=[self.get_object().id])))
+                                  href=reverse('flows.flow_copy', args=[flow.id])))
 
             if self.has_org_perm('orgs.org_export'):
                 links.append(dict(title=_("Export"),
-                                  href='%s?flow=%s' % (reverse('orgs.org_export'), self.get_object().id)))
+                                  href='%s?flow=%s' % (reverse('orgs.org_export'), flow.id)))
 
             if self.has_org_perm('flows.flow_revisions'):
                 links.append(dict(divider=True)),
@@ -855,7 +920,7 @@ class FlowCRUDL(SmartCRUDL):
                 links.append(dict(title=_("Delete"),
                                   delete=True,
                                   success_url=reverse('flows.flow_list'),
-                                  href=reverse('flows.flow_delete', args=[self.get_object().id])))
+                                  href=reverse('flows.flow_delete', args=[flow.id])))
 
             return links
 
@@ -868,13 +933,20 @@ class FlowCRUDL(SmartCRUDL):
             # are there pending starts?
             starting = False
             start = self.object.starts.all().order_by('-created_on')
-            if start.exists() and start[0].status in [FlowStart.STATUS_STARTING, FlowStart.STATUS_PENDING]:
+            if start.exists() and start[0].status in [FlowStart.STATUS_STARTING, FlowStart.STATUS_PENDING]:  # pragma: needs cover
                 starting = True
             context['starting'] = starting
             context['mutable'] = False
             if self.has_org_perm('flows.flow_update') and not self.request.user.is_superuser:
                 context['mutable'] = True
 
+            context['has_airtime_service'] = bool(self.object.org.is_connected_to_transferto())
+
+            flow = self.get_object()
+            can_start = True
+            if flow.flow_type == Flow.VOICE and not flow.org.supports_ivr():  # pragma: needs cover
+                can_start = False
+            context['can_start'] = can_start
             return context
 
         def get_template_names(self):
@@ -905,7 +977,7 @@ class FlowCRUDL(SmartCRUDL):
             def clean(self):
                 cleaned_data = super(FlowCRUDL.ExportResults.ExportForm, self).clean()
 
-                if 'contact_fields' in cleaned_data and len(cleaned_data['contact_fields']) > 10:
+                if 'contact_fields' in cleaned_data and len(cleaned_data['contact_fields']) > 10:  # pragma: needs cover
                     raise forms.ValidationError(_("You can only include up to 10 contact fields in your export"))
 
                 return cleaned_data
@@ -921,7 +993,7 @@ class FlowCRUDL(SmartCRUDL):
 
         def derive_initial(self):
             flow_ids = self.request.GET.get('ids', None)
-            if flow_ids:
+            if flow_ids:  # pragma: needs cover
                 return dict(flows=Flow.objects.filter(org=self.request.user.get_org(), is_active=True,
                                                       id__in=flow_ids.split(',')))
             else:
@@ -944,16 +1016,14 @@ class FlowCRUDL(SmartCRUDL):
                               _("There is already an export in progress, started by %s. You must wait "
                                 "for that export to complete before starting another." % existing.created_by.username))
             else:
-                host = self.request.branding['host']
-
-                export = ExportFlowResultsTask.create(host, org, user, form.cleaned_data['flows'],
+                export = ExportFlowResultsTask.create(org, user, form.cleaned_data['flows'],
                                                       contact_fields=form.cleaned_data['contact_fields'],
                                                       include_runs=form.cleaned_data['include_runs'],
                                                       include_msgs=form.cleaned_data['include_messages'],
                                                       responded_only=form.cleaned_data['responded_only'])
-                export_flow_results_task.delay(export.pk)
+                on_transaction_commit(lambda: export_flow_results_task.delay(export.pk))
 
-                if not getattr(settings, 'CELERY_ALWAYS_EAGER', False):
+                if not getattr(settings, 'CELERY_ALWAYS_EAGER', False):  # pragma: needs cover
                     messages.info(self.request,
                                   _("We are preparing your export. We will e-mail you at %s when it is ready.")
                                   % self.request.user.username)
@@ -976,169 +1046,153 @@ class FlowCRUDL(SmartCRUDL):
                 response['REDIRECT'] = self.get_success_url()
                 return response
 
-    class Results(FormaxMixin, OrgObjPermsMixin, SmartReadView):
+    class ActivityChart(OrgObjPermsMixin, SmartReadView):
+        """
+        Intercooler helper that renders a chart of activity by a given period
+        """
 
-        class RemoveRunForm(forms.Form):
-            run = forms.ModelChoiceField(FlowRun.objects.filter(pk__lt=0))
+        # the min number of responses to show a histogram
+        HISTOGRAM_MIN = 1000
 
-            def __init__(self, flow, *args, **kwargs):
-                self.flow = flow
-                super(FlowCRUDL.Results.RemoveRunForm, self).__init__(*args, **kwargs)
+        # the min number of responses to show the period charts
+        PERIOD_MIN = 200
 
-                self.fields['run'].queryset = FlowRun.objects.filter(flow=flow)
+        EXIT_TYPES = {
+            None: 'active',
+            FlowRun.EXIT_TYPE_COMPLETED: 'completed',
+            FlowRun.EXIT_TYPE_INTERRUPTED: 'interrupted',
+            FlowRun.EXIT_TYPE_EXPIRED: 'expired'
+        }
 
-            def execute(self):
-                data = self.cleaned_data
-                run = data['run']
+        def get_context_data(self, *args, **kwargs):
 
-                # remove this run and its steps in the process
-                run.delete()
-                return dict(status="success")
+            total_responses = 0
+            context = super(FlowCRUDL.ActivityChart, self).get_context_data(*args, **kwargs)
 
-        def derive_formax_sections(self, formax, context):
-            if self.has_org_perm('flows.flow_broadcast'):
-                if 'json' not in self.request.REQUEST:
-                    formax.add_section('broadcast', reverse('flows.flow_broadcast', args=[self.object.pk]),
-                                       'icon-users', action='readonly')
+            flow = self.get_object()
+            from temba.flows.models import FlowPathCount
+            rulesets = list(flow.rule_sets.filter(ruleset_type__in=RuleSet.TYPE_WAIT))
 
-        def post(self, request, *args, **kwargs):
-            form = FlowCRUDL.Results.RemoveRunForm(self.get_object(), self.request.POST)
-            if not self.has_org_perm('flows.flow_delete'):
-                return HttpResponse(json.dumps(dict(error=_("Sorry you have no permission for this action."))))
+            from_uuids = []
+            for ruleset in rulesets:
+                from_uuids += [rule.uuid for rule in ruleset.get_rules()]
 
-            if form.is_valid():
-                result = form.execute()
-                return HttpResponse(json.dumps(result))
+            dates = FlowPathCount.objects.filter(flow=flow, from_uuid__in=from_uuids).aggregate(Max('period'), Min('period'))
+            start_date = dates.get('period__min')
+            end_date = dates.get('period__max')
 
-            # can happen when there are double clicks, just ignore it
-            else:  # pragma: no cover
-                return HttpResponse(json.dumps(dict(status="success")))
+            # by hour of the day
+            hod = FlowPathCount.objects.filter(flow=flow, from_uuid__in=from_uuids).extra({"hour": "extract(hour from period::timestamp)"})
+            hod = hod.values('hour').annotate(count=Sum('count')).order_by('hour')
+            hod_dict = {int(h.get('hour')): h.get('count') for h in hod}
 
-        def render_to_response(self, context, **response_kwargs):
-            org = self.request.user.get_org()
+            hours = []
+            for x in range(0, 24):
+                hours.append({'bucket': datetime(1970, 1, 1, hour=x), 'count': hod_dict.get(x, 0)})
 
-            if 'json' in self.request.REQUEST:
-                start = int(self.request.REQUEST.get('iDisplayStart', 0))
-                show = int(self.request.REQUEST.get('iDisplayLength', 20))
+            # by day of the week
+            dow = FlowPathCount.objects.filter(flow=flow, from_uuid__in=from_uuids).extra({"day": "extract(dow from period::timestamp)"})
+            dow = dow.values('day').annotate(count=Sum('count'))
+            dow_dict = {int(d.get('day')): d.get('count') for d in dow}
 
-                sort_col = int(self.request.REQUEST.get('iSortCol_0', 0))
-                sort_direction = self.request.REQUEST.get('sSortDir_0', 'desc')
+            dow = []
+            for x in range(0, 7):
+                day_count = dow_dict.get(x, 0)
+                dow.append({'day': x, 'count': day_count})
+                total_responses += day_count
 
-                # create mapping of uuid to column
-                col_map = dict()
-                idx = 0
-                for col in self.request.REQUEST.get('cols', '').split(','):
-                    col_map[col] = idx
-                    idx += 1
+            if total_responses > self.PERIOD_MIN:
+                dow = sorted(dow, key=lambda k: k['day'])
+                days = (_('Sunday'), _('Monday'), _('Tuesday'), _('Wednesday'), _('Thursday'), _('Friday'), _('Saturday'))
+                dow = [{'day': days[d['day']], 'count': d['count'],
+                        'pct': 100 * float(d['count']) / float(total_responses)} for d in dow]
+                context['dow'] = dow
+                context['hod'] = hours
 
-                runs = FlowRun.objects.filter(flow=self.object).exclude(contact__is_test=True)
-
-                query = self.request.REQUEST.get('sSearch', None)
-                if query:
-                    if org.is_anon:
-                        # try casting our query to an int if they are querying by contact id
-                        query_int = -1
-                        try:
-                            query_int = int(query)
-                        except Exception:
-                            pass
-
-                        runs = runs.filter(Q(contact__name__icontains=query) | Q(contact__id=query_int))
-                    else:
-                        runs = runs.filter(Q(contact__name__icontains=query) | Q(contact__urns__path__icontains=query))
-
-                if org.is_anon:
-                    runs = runs.values('contact__pk', 'contact__name')
+            if total_responses > self.HISTOGRAM_MIN:
+                # our main histogram
+                date_range = end_date - start_date
+                histogram = FlowPathCount.objects.filter(flow=flow, from_uuid__in=from_uuids)
+                if date_range < timedelta(days=21):
+                    histogram = histogram.extra({"bucket": "date_trunc('hour', period)"})
+                elif date_range < timedelta(days=500):
+                    histogram = histogram.extra({"bucket": "date_trunc('day', period)"})
                 else:
-                    runs = runs.values('contact__pk', 'contact__name', 'contact__urns__path')
+                    histogram = histogram.extra({"bucket": "date_trunc('week', period)"})
 
-                runs = runs.annotate(count=Count('pk'), started=Max('created_on'))\
+                histogram = histogram.values('bucket').annotate(count=Sum('count')).order_by('bucket')
+                context['histogram'] = histogram
 
-                initial_sort = 'started'
-                if sort_col == 1:
-                    if org.is_anon:
-                        initial_sort = 'contact__id'
-                    else:
-                        initial_sort = 'contact__urns__path'
-                elif sort_col == 2:
-                    initial_sort = 'contact__name'
-                elif sort_col == 3:
-                    initial_sort = 'count'
+                # highcharts works in UTC, but we want to offset our chart according to the org timezone
+                context['utcoffset'] = int(datetime.now(flow.org.timezone).utcoffset().total_seconds())
 
-                if sort_direction == 'desc':
-                    initial_sort = "-%s" % initial_sort
-                runs = runs.order_by(initial_sort, '-count')
+            counts = FlowRunCount.objects.filter(flow=flow).values('exit_type').annotate(Sum('count'))
 
-                total = runs.count()
+            total_runs = 0
+            for count in counts:
+                key = self.EXIT_TYPES[count['exit_type']]
+                context[key] = count['count__sum']
+                total_runs += count['count__sum']
 
-                runs = runs[start:(start + show)]
+            # make sure we have a value for each one
+            for state in ('expired', 'interrupted', 'completed', 'active'):
+                if state not in context:
+                    context[state] = 0
 
-                # fetch the step data for our set of contacts
-                contacts = []
-                for run in runs:
-                    contacts.append(run['contact__pk'])
+            context['total_runs'] = total_runs
+            context['total_responses'] = total_responses
 
-                steps = FlowStep.objects.filter(run__flow=self.object, run__contact__in=contacts).exclude(rule_value=None).order_by('run__contact__pk', 'step_uuid', '-arrived_on').distinct('run__contact__pk', 'step_uuid')
+            return context
 
-                # now create an nice table for them
-                contacts = dict()
+    class RunTable(OrgObjPermsMixin, SmartReadView):
+        """
+        Intercooler helper which renders rows of runs to be embedded in an existing table with infinite scrolling
+        """
 
-                for step in steps:
-                    contact_pk = step.run.contact.pk
-                    if contact_pk in contacts:
-                        contact_steps = contacts[contact_pk]
-                    else:
-                        contact_steps = ['' for i in range(len(col_map))]
+        paginate_by = 100
 
-                    if step.step_uuid in col_map:
-                        contact_steps[col_map[step.step_uuid]] = dict(value=step.rule_value, category=step.rule_category, text=step.get_text())
-                    contacts[contact_pk] = contact_steps
+        def get_context_data(self, *args, **kwargs):
+            context = super(FlowCRUDL.RunTable, self).get_context_data(*args, **kwargs)
+            flow = self.get_object()
 
-                rows = []
-                for run in runs:
+            context['rulesets'] = list(flow.rule_sets.filter(ruleset_type__in=RuleSet.TYPE_WAIT).order_by('y'))
+            for ruleset in context['rulesets']:
+                rules = len(ruleset.get_rules())
+                ruleset.category = 'true' if rules > 1 else 'false'
 
-                    cols = [dict() for i in range(len(col_map))]
-                    if run['contact__pk'] in contacts:
-                        cols = contacts[run['contact__pk']]
-                    name = ""
-                    if run['contact__name']:
-                        name = run['contact__name']
+            runs = FlowRun.objects.filter(flow=flow, responded=True)
 
-                    date = run['started']
-                    date = timezone.localtime(date).strftime('%b %d, %Y %I:%M %p').lstrip("0").replace(" 0", " ")
+            # paginate
+            modified_on = self.request.GET.get('modified_on', None)
+            if modified_on:
+                id = self.request.GET['id']
+                modified_on = datetime.fromtimestamp(int(modified_on), flow.org.timezone)
+                runs = runs.filter(modified_on__lt=modified_on).exclude(modified_on=modified_on, id__lt=id)
 
-                    phone = "%010d" % run['contact__pk']
-                    if not org.is_anon:
-                        phone = run['contact__urns__path']
+            runs = list(runs.order_by('-modified_on')[:self.paginate_by])
 
-                    rows.append([date,
-                                 dict(category=phone, contact=run['contact__pk']),
-                                 dict(category=name),
-                                 dict(contact=run['contact__pk'], category=run['count'])] + cols)
+            # populate ruleset values
+            for run in runs:
+                values = {v.ruleset.uuid: v for v in
+                          Value.objects.filter(run=run, ruleset__in=context['rulesets']).select_related('ruleset')}
+                run.value_list = []
+                for ruleset in context['rulesets']:
+                    value = values.get(ruleset.uuid)
+                    run.value_list.append(value)
 
-                return build_json_response(dict(iTotalRecords=total, iTotalDisplayRecords=total, sEcho=self.request.REQUEST.get('sEcho', 0), aaData=rows))
-            else:
-                if 'c' in self.request.REQUEST:
-                    contact = Contact.objects.filter(pk=self.request.REQUEST['c'], org=self.object.org, is_active=True)
-                    if contact:
-                        contact = contact[0]
-                        runs = list(contact.runs.filter(flow=self.object).order_by('-created_on'))
-                        for run in runs:
-                            # step_uuid__in=step_uuids
-                            run.__dict__['messages'] = list(Msg.all_messages.filter(steps__run=run).order_by('created_on'))
-                        context['runs'] = runs
-                        context['contact'] = contact
+            context['runs'] = runs
 
-                return super(FlowCRUDL.Results, self).render_to_response(context, **response_kwargs)
+            return context
 
-        def get_template_names(self):
-            if 'c' in self.request.REQUEST:
-                return ['flows/flow_results_contact.haml']
-            else:
-                return super(FlowCRUDL.Results, self).get_template_names()
+    class Results(OrgObjPermsMixin, SmartReadView):
 
         def get_context_data(self, *args, **kwargs):
             context = super(FlowCRUDL.Results, self).get_context_data(*args, **kwargs)
+            flow = self.get_object()
+            context['rulesets'] = list(flow.rule_sets.filter(ruleset_type__in=RuleSet.TYPE_WAIT).order_by('y'))
+            for ruleset in context['rulesets']:
+                rules = len(ruleset.get_rules())
+                ruleset.category = 'true' if rules > 1 else 'false'
             return context
 
     class Activity(OrgObjPermsMixin, SmartReadView):
@@ -1148,32 +1202,26 @@ class FlowCRUDL(SmartCRUDL):
 
             # if we are interested in the flow details add that
             flow_json = dict()
-            if request.REQUEST.get('flow', 0):
+            if request.GET.get('flow', 0):  # pragma: needs cover
                 flow_json = flow.as_json()
 
             # get our latest start, we might warn the user that one is in progress
             start = flow.starts.all().order_by('-created_on')
             pending = None
-            if start.count() and (start[0].status == FlowStart.STATUS_STARTING or start[0].status == FlowStart.STATUS_PENDING):
+            if start.count() and (start[0].status == FlowStart.STATUS_STARTING or start[0].status == FlowStart.STATUS_PENDING):  # pragma: needs cover
                 pending = start[0].status
 
             # if we have an active call, include that
             from temba.ivr.models import IVRCall
 
             messages = []
-            call = IVRCall.objects.filter(contact__is_test=True, flow=flow).first()
+            call = IVRCall.objects.filter(contact__is_test=True).first()
             if call:
-                call = dict(pk=call.pk,
-                            call_type=call.call_type,
-                            status=call.status,
-                            duration=call.get_duration(),
-                            number=call.contact.raw_tel())
-
-                messages = Msg.current_messages.filter(contact=Contact.get_test_contact(self.request.user)).order_by('created_on')
+                messages = Msg.objects.filter(contact=Contact.get_test_contact(self.request.user)).order_by('created_on')
                 action_logs = list(ActionLog.objects.filter(run__flow=flow, run__contact__is_test=True).order_by('created_on'))
 
                 messages_and_logs = chain(messages, action_logs)
-                messages_and_logs = sorted(messages_and_logs, cmp=msg_log_cmp)
+                messages_and_logs = sorted(messages_and_logs, key=cmp_to_key(msg_log_cmp))
 
                 messages_json = []
                 if messages_and_logs:
@@ -1183,51 +1231,51 @@ class FlowCRUDL(SmartCRUDL):
 
             (active, visited) = flow.get_activity()
 
-            return build_json_response(dict(call=call, messages=messages,
-                                            activity=active,
-                                            visited=visited,
-                                            flow=flow_json, pending=pending))
+            return JsonResponse(dict(messages=messages, activity=active, visited=visited,
+                                     flow=flow_json, pending=pending))
 
     class Simulate(OrgObjPermsMixin, SmartReadView):
 
         def get(self, request, *args, **kwargs):
-            return HttpResponseRedirect(reverse('flows.flow_editor', args=[self.get_object().pk]))
+            return HttpResponseRedirect(reverse('flows.flow_editor', args=[self.get_object().uuid]))
 
         def post(self, request, *args, **kwargs):
 
             # try to parse our body
             try:
                 json_dict = json.loads(request.body)
-            except Exception as e:
-                return build_json_response(dict(status="error", description="Error parsing JSON: %s" % str(e)), status=400)
+            except Exception as e:  # pragma: needs cover
+                return JsonResponse(dict(status="error", description="Error parsing JSON: %s" % str(e)), status=400)
 
             Contact.set_simulation(True)
             user = self.request.user
             test_contact = Contact.get_test_contact(user)
-
-            analytics.track(user.username, 'temba.flow_simulated')
-
             flow = self.get_object(self.get_queryset())
 
-            if json_dict and json_dict.get('hangup', False):
+            if json_dict and json_dict.get('hangup', False):  # pragma: needs cover
                 # hangup any test calls if we have them
                 IVRCall.hangup_test_call(self.get_object())
-                return build_json_response(dict(status="success", message="Test call hung up"))
+                return JsonResponse(dict(status="success", message="Test call hung up"))
 
             if json_dict and json_dict.get('has_refresh', False):
 
-                lang = request.REQUEST.get('lang', None)
+                lang = request.GET.get('lang', None)
                 if lang:
                     test_contact.language = lang
                     test_contact.save()
 
                 # delete all our steps and messages to restart the simulation
-                runs = FlowRun.objects.filter(contact=test_contact)
+                runs = FlowRun.objects.filter(contact=test_contact).order_by('-modified_on')
                 steps = FlowStep.objects.filter(run__in=runs)
 
+                # if their last simulation was more than a day ago, log this simulation
+                if runs and runs.first().created_on < timezone.now() - timedelta(hours=24):  # pragma: needs cover
+                    analytics.track(user.username, 'temba.flow_simulated')
+
                 ActionLog.objects.filter(run__in=runs).delete()
-                Msg.current_messages.filter(contact=test_contact).delete()
+                Msg.objects.filter(contact=test_contact).delete()
                 IVRCall.objects.filter(contact=test_contact).delete()
+                USSDSession.objects.filter(contact=test_contact).delete()
 
                 runs.delete()
                 steps.delete()
@@ -1252,31 +1300,48 @@ class FlowCRUDL(SmartCRUDL):
             from temba.settings import TEMBA_HOST, STATIC_URL
             media_url = 'http://%s%simages' % (TEMBA_HOST, STATIC_URL)
 
-            if 'new_photo' in json_dict:
+            if 'new_photo' in json_dict:  # pragma: needs cover
                 media = '%s/png:%s/simulator_photo.png' % (Msg.MEDIA_IMAGE, media_url)
-            elif 'new_gps' in json_dict:
+            elif 'new_gps' in json_dict:  # pragma: needs cover
                 media = '%s:47.6089533,-122.34177' % Msg.MEDIA_GPS
-            elif 'new_video' in json_dict:
+            elif 'new_video' in json_dict:  # pragma: needs cover
                 media = '%s/mp4:%s/simulator_video.mp4' % (Msg.MEDIA_VIDEO, media_url)
-            elif 'new_audio' in json_dict:
+            elif 'new_audio' in json_dict:  # pragma: needs cover
                 media = '%s/mp4:%s/simulator_audio.m4a' % (Msg.MEDIA_AUDIO, media_url)
 
             if new_message or media:
                 try:
-                    Msg.create_incoming(None,
-                                        test_contact.get_urn(TEL_SCHEME).urn,
-                                        new_message,
-                                        media=media,
-                                        org=user.get_org())
-                except Exception as e:
-                    traceback.print_exc(e)
-                    return build_json_response(dict(status="error", description="Error creating message: %s" % str(e)), status=400)
+                    if flow.flow_type == Flow.USSD:
+                        if new_message == "__interrupt__":
+                            status = USSDSession.INTERRUPTED
+                        else:
+                            status = None
+                        USSDSession.handle_incoming(test_contact.org.get_send_channel(contact_urn=test_contact.get_urn(TEL_SCHEME)),
+                                                    test_contact.get_urn(TEL_SCHEME).path,
+                                                    content=new_message,
+                                                    date=timezone.now(),
+                                                    message_id=str(randint(0, 1000)),
+                                                    external_id=str(randint(0, 1000)),
+                                                    org=user.get_org(),
+                                                    status=status)
+                    else:
+                        Msg.create_incoming(None,
+                                            test_contact.get_urn(TEL_SCHEME).urn,
+                                            new_message,
+                                            media=media,
+                                            org=user.get_org(),
+                                            status=PENDING)
+                except Exception as e:  # pragma: needs cover
 
-            messages = Msg.current_messages.filter(contact=test_contact).order_by('pk', 'created_on')
+                    traceback.print_exc(e)
+                    return JsonResponse(dict(status="error", description="Error creating message: %s" % str(e)),
+                                        status=400)
+
+            messages = Msg.objects.filter(contact=test_contact).order_by('pk', 'created_on')
             action_logs = ActionLog.objects.filter(run__contact=test_contact).order_by('pk', 'created_on')
 
             messages_and_logs = chain(messages, action_logs)
-            messages_and_logs = sorted(messages_and_logs, cmp=msg_log_cmp)
+            messages_and_logs = sorted(messages_and_logs, key=cmp_to_key(msg_log_cmp))
 
             messages_json = []
             if messages_and_logs:
@@ -1293,7 +1358,7 @@ class FlowCRUDL(SmartCRUDL):
                 if ruleset:
                     response['ruleset'] = ruleset.as_json()
 
-            return build_json_response(dict(status="success", description="Message sent to Flow", **response))
+            return JsonResponse(dict(status="success", description="Message sent to Flow", **response))
 
     class Json(OrgObjPermsMixin, SmartUpdateView):
         success_message = ''
@@ -1306,9 +1371,17 @@ class FlowCRUDL(SmartCRUDL):
             # all the translation languages for our org
             languages = [lang.as_json() for lang in flow.org.languages.all().order_by('orgs')]
 
+            # all countries we have a channel for, never fail here
+            try:
+                channel_countries = flow.org.get_channel_countries()
+            except Exception:  # pragma: needs cover
+                logger.error('Unable to get currency for channel countries.', exc_info=True)
+                channel_countries = []
+
             # all the channels available for our org
             channels = [dict(uuid=chan.uuid, name=u"%s: %s" % (chan.get_channel_type_display(), chan.get_address_display())) for chan in flow.org.channels.filter(is_active=True)]
-            return build_json_response(dict(flow=flow.as_json(expand_contacts=True), languages=languages, channels=channels))
+            return JsonResponse(dict(flow=flow.as_json(expand_contacts=True), languages=languages,
+                                     channel_countries=channel_countries, channels=channels))
 
         def post(self, request, *args, **kwargs):
 
@@ -1319,18 +1392,20 @@ class FlowCRUDL(SmartCRUDL):
             # try to parse our body
             json_string = request.body
 
-            analytics.track(self.request.user.username, 'temba.flow_updated')
+            # if the last modified on this flow is more than a day ago, log that this flow as updated
+            if self.get_object().saved_on < timezone.now() - timedelta(hours=24):  # pragma: needs cover
+                analytics.track(self.request.user.username, 'temba.flow_updated')
 
             # try to save the our flow, if this fails, let's let that bubble up to our logger
             json_dict = json.loads(json_string)
-            print json.dumps(json_dict, indent=2)
+            print(json.dumps(json_dict, indent=2))
 
             try:
                 response_data = self.get_object(self.get_queryset()).update(json_dict, user=self.request.user)
-                return build_json_response(response_data, status=200)
+                return JsonResponse(response_data, status=200)
             except Exception as e:
                 # give the editor a formatted error response
-                return build_json_response(dict(status="failure", description=str(e)), status=400)
+                return JsonResponse(dict(status="failure", description=str(e)), status=400)
 
     class Broadcast(ModalMixin, OrgObjPermsMixin, SmartUpdateView):
         class BroadcastForm(forms.ModelForm):
@@ -1349,7 +1424,7 @@ class FlowCRUDL(SmartCRUDL):
 
             def clean_omnibox(self):
                 starting = self.cleaned_data['omnibox']
-                if not starting['groups'] and not starting['contacts']:
+                if not starting['groups'] and not starting['contacts']:  # pragma: needs cover
                     raise ValidationError(_("You must specify at least one contact or one group to start a flow."))
 
                 return starting
@@ -1374,7 +1449,7 @@ class FlowCRUDL(SmartCRUDL):
         fields = ('omnibox', 'restart_participants')
         success_message = ''
         submit_button_name = _("Add Contacts to Flow")
-        success_url = 'id@flows.flow_editor'
+        success_url = 'uuid@flows.flow_editor'
 
         def get_context_data(self, *args, **kwargs):
             context = super(FlowCRUDL.Broadcast, self).get_context_data(*args, **kwargs)
@@ -1406,7 +1481,7 @@ class FlowCRUDL(SmartCRUDL):
 
 
 # this is just for adhoc testing of the preprocess url
-class PreprocessTest(FormView):
+class PreprocessTest(FormView):  # pragma: no cover
 
     @csrf_exempt
     def dispatch(self, *args, **kwargs):
@@ -1414,7 +1489,7 @@ class PreprocessTest(FormView):
 
     def post(self, request, *args, **kwargs):
         return HttpResponse(json.dumps(dict(text='Norbert', extra=dict(occupation='hoopster', skillz=7.9))),
-                            content_type='application/javascript')
+                            content_type='application/json')
 
 
 class FlowLabelForm(forms.ModelForm):
@@ -1494,12 +1569,12 @@ class FlowLabelCRUDL(SmartCRUDL):
             obj = super(FlowLabelCRUDL.Create, self).post_save(obj, *args, **kwargs)
 
             flow_ids = []
-            if self.form.cleaned_data['flows']:
+            if self.form.cleaned_data['flows']:  # pragma: needs cover
                 flow_ids = [int(f) for f in self.form.cleaned_data['flows'].split(',') if f.isdigit()]
 
             flows = Flow.objects.filter(org=obj.org, is_active=True, pk__in=flow_ids)
 
-            if flows:
+            if flows:  # pragma: needs cover
                 obj.toggle_label(flows, add=True)
 
             return obj
