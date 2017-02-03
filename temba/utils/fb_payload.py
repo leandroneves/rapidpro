@@ -1,16 +1,12 @@
 from __future__ import absolute_import, unicode_literals
 
 OTHER = 'other'
-BUTTON = 'button'
-QUICK_REPLIES = 'quick_replies'
 WAIT_MESSAGE = 'wait_message'
 RULES = 'rules'
 CATEGORY = 'category'
 BASE = 'base'
 RULESET_TYPE = 'ruleset_type'
 TEXT = 'text'
-POSTBACK = 'postback'
-TEMPLATE = 'template'
 TEST = 'test'
 STR_TRUE = 'true'
 CONTAINS_ANY = 'contains_any'
@@ -18,82 +14,51 @@ TYPE = 'type'
 EQ = 'eq'
 
 
-def get_fb_payload(msg, text):
-    from temba.msgs.models import Msg
-    from temba.flows.models import RuleSet
+def get_fb_payload(rules, text, lang):
 
     payload = dict(text=text)
 
-    real_msg = Msg.all_messages.filter(id=msg.id).first()
-    if real_msg:
-        step = real_msg.get_flow_step()
-        destination = step.get_step().destination
+    if rules:
+        is_valid = check_rules(rules.get(RULES))
+        if is_valid and rules.get(RULESET_TYPE) == WAIT_MESSAGE:
 
-        try:
-            rule = RuleSet.objects.filter(uuid=destination).first()
-            lang = rule.flow.base_language
-            rules = rule.as_json()
-        except:
-            lang = BASE
-            rules = None
+            buttons = []
+            for rule in rules.get(RULES):
+                category, value = get_values(rule, lang)
 
-        if rules:
-            model = get_model(rules.get(RULES))
-            if model and rules.get(RULESET_TYPE) == WAIT_MESSAGE:
+                if category and value:
+                    buttons.append(dict(content_type=TEXT, title=category, payload=value))
 
-                buttons = []
-                for rule in rules.get(RULES):
-                    category, value = get_value_payload(rule, lang)
-
-                    if category and value:
-                        if model == BUTTON:
-                            buttons.append(dict(type=POSTBACK, title=category, payload=value))
-                        else:
-                            buttons.append(dict(content_type=TEXT, title=category, payload=value))
-
-                if buttons:
-                    if model == BUTTON:
-                        obj_payload = dict(template_type=BUTTON, text=text, buttons=buttons)
-                        attachment = dict(type=TEMPLATE, payload=obj_payload)
-                        payload = dict(attachment=attachment)
-                    else:
-                        payload = dict(text=text, quick_replies=buttons)
+            if buttons:
+                payload = dict(text=text, quick_replies=buttons)
 
     return payload
 
 
-def get_model(rules):
+def check_rules(rules):
     if len(rules) == 1:
         if rules[0].get(TEST).get(TEST) == STR_TRUE:
-            return None
+            return False
 
-    if 0 < len(rules) <= 4:
-        response = BUTTON
-    elif 4 < len(rules) <= 10:
-        response = QUICK_REPLIES
-    else:
-        return None
-
-    return response
+    return True
 
 
-def get_value_payload(rule, lang):
+def get_values(rule, lang):
     category = rule.get(CATEGORY)
     test = rule.get(TEST).get(TEST)
     value = None
+    lang = lang or BASE
 
-    PERM = [EQ, CONTAINS_ANY]
+    category = category.get(lang, category.get(BASE))
 
-    if test == STR_TRUE or rule.get(TEST).get(TYPE) not in PERM:
+    allowed_types = [EQ, CONTAINS_ANY]
+
+    if test == STR_TRUE or rule.get(TEST).get(TYPE) not in allowed_types:
         pass
-    elif category.get(lang) != OTHER.capitalize():
-        try:
-            base = test.get(lang)
-        except:
-            base = test
-
+    elif category.lower() != OTHER.lower():
+        base = test.get(lang, test.get(BASE))
         value = base.split(' ')[0]
 
-    category = category.get(lang)[:20] if category.get(lang) else category.get(BASE)
+    category = category[:20]
 
     return category, value
