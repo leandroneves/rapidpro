@@ -223,8 +223,7 @@ class Broadcast(models.Model):
     purged = models.BooleanField(default=False,
                                  help_text="If the messages for this broadcast have been purged")
 
-    # flow_rules = models.TextField(verbose_name=_("Flow rules"), null=True,
-    #                               help_text=_("Flow rules serialized"))
+    flow_rules = models.TextField(verbose_name=_("Flow rules"), null=True, help_text=_("Flow rules serialized"))
 
     @classmethod
     def create(cls, org, user, text, recipients, channel=None, rule_sets=list(), **kwargs):
@@ -235,7 +234,8 @@ class Broadcast(models.Model):
             flow_rules[rule_json.get('uuid')] = rule_json
 
         flow_rules = json.dumps(flow_rules)
-        create_args = dict(org=org, text=text, channel=channel, created_by=user, modified_by=user)
+        create_args = dict(org=org, text=text, channel=channel, created_by=user, modified_by=user,
+                           flow_rules=flow_rules)
         create_args.update(kwargs)
         broadcast = Broadcast.objects.create(**create_args)
         broadcast.update_recipients(recipients)
@@ -1155,14 +1155,19 @@ class Msg(models.Model):
         """
         Used internally to serialize to JSON when queueing messages in Redis
         """
+        flow_step = self.get_flow_step()
+        if flow_step:
+            destination = flow_step.get_step().destination
+        else:
+            destination = None
         return dict(id=self.id, org=self.org_id, channel=self.channel_id, broadcast=self.broadcast_id,
                     text=self.text, urn_path=self.contact_urn.path,
                     contact=self.contact_id, contact_urn=self.contact_urn_id,
                     priority=self.priority, error_count=self.error_count, next_attempt=self.next_attempt,
-                    status=self.status, direction=self.direction,
+                    status=self.status, direction=self.direction, destination=destination,
                     external_id=self.external_id, response_to_id=self.response_to_id,
-                    sent_on=self.sent_on, queued_on=self.queued_on,
-                    created_on=self.created_on, modified_on=self.modified_on)
+                    sent_on=self.sent_on, queued_on=self.queued_on, lang=self.contact.language,
+                    created_on=self.created_on, modified_on=self.modified_on, rules=self.broadcast.flow_rules)
 
     def __str__(self):
         return self.text
