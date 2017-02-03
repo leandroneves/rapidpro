@@ -223,8 +223,18 @@ class Broadcast(models.Model):
     purged = models.BooleanField(default=False,
                                  help_text="If the messages for this broadcast have been purged")
 
+    # flow_rules = models.TextField(verbose_name=_("Flow rules"), null=True,
+    #                               help_text=_("Flow rules serialized"))
+
     @classmethod
-    def create(cls, org, user, text, recipients, channel=None, **kwargs):
+    def create(cls, org, user, text, recipients, channel=None, rule_sets=list(), **kwargs):
+        flow_rules = {}
+
+        for rule in rule_sets:
+            rule_json = rule.as_json()
+            flow_rules[rule_json.get('uuid')] = rule_json
+
+        flow_rules = json.dumps(flow_rules)
         create_args = dict(org=org, text=text, channel=channel, created_by=user, modified_by=user)
         create_args.update(kwargs)
         broadcast = Broadcast.objects.create(**create_args)
