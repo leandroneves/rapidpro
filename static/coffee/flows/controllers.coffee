@@ -1047,8 +1047,19 @@ NodeEditorController = ($rootScope, $scope, $modalInstance, $timeout, $log, Flow
   if ruleset.config
     formData.webhook = ruleset.config.webhook
     formData.webhook_action = ruleset.config.webhook_action
+    if ruleset.config.webhook_header
+      formData.webhook_header_key = Object.keys(ruleset.config.webhook_header)[0]
+      formData.webhook_header_value = Object.values(ruleset.config.webhook_header)[0]
+    else
+      formData.webhook_header_key = ''
+      formData.webhook_header_value = ''
 
   formData.rulesetConfig = Flow.getRulesetConfig({type:ruleset.ruleset_type})
+
+  $scope.updateWebhookHeader = () ->
+    formData.webhook_header = {}
+    if formData.webhook_header_key and formData.webhook_header_value
+      formData.webhook_header[formData.webhook_header_key] = formData.webhook_header_value
 
   $scope.updateActionForm = (config) ->
 
@@ -1636,6 +1647,7 @@ NodeEditorController = ($rootScope, $scope, $modalInstance, $timeout, $log, Flow
         ruleset.config =
           webhook: formData.webhook
           webhook_action: formData.webhook_action
+          webhook_header: formData.webhook_header
 
       # update our operand if they selected a contact field explicitly
       else if rulesetConfig.type == 'contact_field'
