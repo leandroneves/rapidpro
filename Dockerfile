@@ -34,12 +34,15 @@ RUN apt-get install -y nodejs
 RUN npm install -g bower
 RUN npm install -g less
 RUN npm install -g coffee-script
+RUN npm install -g grunt
 RUN bower install --allow-root
+RUN npm install
 RUN python manage.py collectstatic --noinput
 
 RUN touch `echo $RANDOM`.txt
 
 RUN python manage.py compress --extension=.haml
+RUN grunt
 
 #Nginx setup
 RUN echo "daemon off;" >> /etc/nginx/nginx.conf
@@ -48,7 +51,16 @@ RUN ln -s /udo-rapidpro/nginx.conf /etc/nginx/sites-enabled/
 
 RUN rm /udo-rapidpro/temba/settings.pyc
 
-COPY settings.py.static /udo-rapidpro/temba/settings.py
+#Varnish setup
+RUN curl https://repo.varnish-cache.org/ubuntu/GPG-key.txt | apt-key add -
+RUN echo "deb https://repo.varnish-cache.org/ubuntu/ trusty varnish-4.0" >> /etc/apt/sources.list.d/varnish-cache.list
+RUN apt-get update
+RUN apt-get install varnish -qyy
+
+COPY varnish.default.vcl /etc/varnish/default.vcl
+COPY varnish.params /etc/default/varnish
+
+# COPY settings.py.static /udo-rapidpro/temba/settings.py
 
 EXPOSE 8000
 EXPOSE 80
@@ -56,10 +68,19 @@ EXPOSE 80
 #COPY docker-entrypoint.sh /udo-rapidpro/
 
 ENTRYPOINT ["/udo-rapidpro/entrypoint.sh"]
-
 CMD ["supervisor"]
+
+###
+# SSH
+RUN apt-get install -y openssh-server
+RUN mkdir /var/run/sshd
+RUN echo 'root:root' |chpasswd
+RUN sed -ri 's/^PermitRootLogin\s+.*/PermitRootLogin yes/' /etc/ssh/sshd_config
+RUN sed -ri 's/UsePAM yes/#UsePAM yes/g' /etc/ssh/sshd_config
+EXPOSE 22
+CMD    ["/usr/sbin/sshd", "-D"]
+# SSH
 
 #Image cleanup
 RUN apt-get clean
 RUN rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*[~]$ 
-

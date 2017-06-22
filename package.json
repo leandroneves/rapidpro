@@ -8,6 +8,9 @@
     "less": "2.7.1"
   },
   "devDependencies": {
+    "grunt": "^1.0.1",
+    "grunt-contrib-cssmin": "^2.2.0",
+    "grunt-contrib-uglify": "^3.0.1",
     "jasmine-core": "^2.5.0",
     "karma": "^0.12.37",
     "karma-chrome-launcher": "^0.1.7",

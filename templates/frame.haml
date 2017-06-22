@@ -1,5 +1,5 @@
 <!DOCTYPE HTML>
--load humanize
+-load humanize compress
 {% block html-tag %}
 <!--[if lte IE 8]><html class="ie" lang="en">    <![endif]-->
 <!--[if !IE]><!--><html lang="en">              <!--<![endif]-->
@@ -10,53 +10,27 @@
         {{ brand.name }} - Visually build interactive SMS Applications
       {% endblock %}
 
-    %link{href:'{{STATIC_URL}}fonts/roboto/stylesheet.css', rel:'stylesheet', type:'text/css'}
+    -compress css
+      %link{href:'{{STATIC_URL}}fonts/roboto/stylesheet.css', rel:'stylesheet', type:'text/css'}
     %meta{charset:"utf-8"}
     %meta{name:"viewport", content:"width=device-width, initial-scale=1.0"}
     %meta{name:"description", content:"{% block page-description %}{{brand.name}} lets you visually build interactive SMS applications and launch them anywhere in the world.{% endblock %}"}
     %meta{name:"author", content:"Nyaruka Ltd"}
     %meta{http-equiv:"X-UA-Compatible", content:"IE=10"}
 
-    -load compress
-    :javascript
-
-      function conditionalLoad(local, remote) {
-        if (local != null && (window.location.hostname == "localhost" || remote == null)) {
-          loadResource("{{ STATIC_URL }}" + local);
-        } else if (remote != null) {
-          loadResource(remote);
-        }
-      }
-
-      function loadResource(src) {
-        (function() { document.write(unescape('%3Cscript src="' + src + '"%3E%3C/script%3E')); })();
-      }
-
-
-    // ==== JQUERY ====
-    :javascript
-      conditionalLoad('bower/jquery/jquery.js', '//ajax.googleapis.com/ajax/libs/jquery/2.0.3/jquery.js');
-      conditionalLoad('bower/jquery-migrate/jquery-migrate.min.js', null);
-
-    // ==== ANGULAR ====
-    :javascript
-
-      // this has to be loaded before angular
-      conditionalLoad('lib/angular-file-upload-1.6.12/angular-file-upload-shim.js', null);
-
-      // our angular scripts
-      conditionalLoad('bower/angular/angular.js', null);
-      conditionalLoad('bower/angular-animate/angular-animate.js', null);
-
-      // this must be loaded after angular
-      conditionalLoad('lib/angular-file-upload-1.6.12/angular-file-upload.js', null)
-
     -# this view make it possible to process translations from javascript land
     <script src="{% url 'django.views.i18n.javascript_catalog' %}"></script>
 
     -compress js
+      %script{src:"{{ STATIC_URL }}bower/jquery/jquery.js"}
+      %script{src:"{{ STATIC_URL }}bower/jquery-migrate/jquery-migrate.min.js"}
+      %script{src:"{{ STATIC_URL }}lib/angular-file-upload-1.6.12/angular-file-upload-shim.js"}
+      %script{src:"{{ STATIC_URL }}bower/angular/angular.js"}
+      %script{src:"{{ STATIC_URL }}bower/angular-animate/angular-animate.js"}
+      %script{src:"{{ STATIC_URL }}lib/angular-file-upload-1.6.12/angular-file-upload.js"}
+
       :javascript
-         var static_url = '{{STATIC_URL}}';
+        var static_url = '{{STATIC_URL}}';
 
       %script{src:"{{ STATIC_URL }}bower/toastr/toastr.js"}
       %script{src:"{{ STATIC_URL }}bower/select2/select2.js"}
@@ -87,7 +61,6 @@
       %script{src:"{{ STATIC_URL }}bower/xregexp/xregexp-all.js"}
       %script{src:"{{ STATIC_URL }}bower/sticky-kit/jquery.sticky-kit.js"}
 
-
       // Non-bower packages
       %script{src:"{{ STATIC_URL }}lib/uuid.js"}
       %script{src:"{{ STATIC_URL }}lib/bootstrap-limit.js"}
@@ -95,11 +68,8 @@
 
       // smartmin
       %script{src:"{{ STATIC_URL }}js/heavy_data.js"}
+      %script{src:"{{ STATIC_URL }}lib/raven.min.js"}
 
-      -if not debug and not testing
-        %script{src:"{{ STATIC_URL }}lib/raven.min.js"}
-
-    -compress js
       %script{src:"{{ STATIC_URL }}js/omnibox.js"}
       %script{src:"{{ STATIC_URL }}js/temba.js"}
       %script{src:"{{ STATIC_URL }}js/excellent.js"}
@@ -107,7 +77,6 @@
       %script{src:"{{ STATIC_URL }}coffee/temba.coffee", type:'text/coffeescript'}
       %script{src:"{{ STATIC_URL }}coffee/formax.coffee", type:'text/coffeescript'}
       %script{src:"{{ STATIC_URL }}coffee/completions.coffee", type:'text/coffeescript'}
-
 
     -include "includes/frame_top.html"
 
@@ -124,11 +93,9 @@
         %link{type:'text/css', rel:'stylesheet', href:'{{ STATIC_URL }}bower/bootstrap-css/css/bootstrap.css',  media:'all' }
         %link{type:'text/css', rel:'stylesheet', href:'{{ STATIC_URL }}bower/animate.css/animate.css',  media:'all' }
 
-      -compress css
         %link{type:'text/css', rel:'stylesheet', href:'{{ STATIC_URL }}bower/bootstrap-css/css/bootstrap-responsive.css',
               media:'all and (min-width: 1200px), all and (max-width: 767px), all and (max-width: 480px), all and (min-width: 980px)' }
 
-      -compress css
         %link{type:'text/css', rel:'stylesheet', href:"{{ STATIC_URL }}bower/toastr/toastr.css", media:'all'}
         %link{type:'text/css', rel:'stylesheet', href:"{{ STATIC_URL }}bower/select2/select2.css", media:'all'}
         %link{type:'text/css', rel:'stylesheet', href:'{{ STATIC_URL }}bower/At.js/dist/css/jquery.atwho.css', media:'all'}
@@ -138,11 +105,8 @@
         %link{type:'text/css', rel:'stylesheet', href:"{{ STATIC_URL }}bower/video.js/dist/video-js.css", media:'all'}
         %link{type:'text/css', rel:'stylesheet', href:"{{ STATIC_URL }}bower/videojs-vjsdownload/dist/videojs-vjsdownload.css", media:'all'}
 
-      -compress css
         %link{type:'text/css', rel:'stylesheet', href:"{{ STATIC_URL }}fonts/temba/style.css", media:'all'}
         %link{type:'text/less', rel:'stylesheet', href:'{{STATIC_URL}}less/print.less', media:'print'}
-
-      -compress css
 
         {% lessblock %}
           :plain
