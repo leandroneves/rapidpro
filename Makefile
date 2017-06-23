@@ -1,6 +1,6 @@
 #uDo Docker build management
 REGISTRY = 452158872079.dkr.ecr.us-east-1.amazonaws.com
-IMAGE = rapidpro-udo
+IMAGE = push-docker
 BUILD_NUMBER?=latest
 
 .PHONY: build release 
